@@ -103,6 +103,7 @@ static struct udevice *eink_dev;
 static volatile int last_logo_type = -1;
 static int read_vcom_from_vendor(void)
 {
+    return -1;//do not read from vendor_storage from emmc,for now ,the emmc of ID=17 has wrong data
 	int ret = 0;
 	char vcom_str[EINK_VCOM_MAX] = {0};
 	char vcom_args[EINK_VCOM_MAX] = {0};
