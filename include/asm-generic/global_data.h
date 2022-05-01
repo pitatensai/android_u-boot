@@ -83,20 +83,15 @@ typedef struct global_data {
 #ifdef CONFIG_TIMER
 	struct udevice	*timer;		/* Timer instance for Driver Model */
 #endif
-
-#ifdef CONFIG_USING_KERNEL_DTB
-	const void *fdt_blob_kern;	/* Kernel dtb at the tail of u-boot.bin */
-#endif
 	const void *fdt_blob;		/* Our device tree, NULL if none */
-
-#ifdef CONFIG_USING_KERNEL_DTB
-	const void *ufdt_blob;		/* Our U-Boot device tree, NULL if none */
-#endif
 	void *new_fdt;			/* Relocated FDT */
 	unsigned long fdt_size;		/* Space reserved for relocated FDT */
 #ifdef CONFIG_OF_LIVE
 	struct device_node *of_root;
+	struct device_node *of_root_f;  /* U-Boot of-root instance */
 #endif
+	const void *ufdt_blob;		/* Our U-Boot device tree, NULL if none */
+	const void *fdt_blob_kern;	/* Kernel dtb at the tail of u-boot.bin */
 	struct jt_funcs *jt;		/* jump table */
 	char env_buf[32];		/* buffer for env_get() before reloc. */
 #ifdef CONFIG_TRACE
@@ -180,6 +175,7 @@ typedef struct global_data {
 #define GD_FLG_ENV_DEFAULT	0x02000 /* Default variable flag	   */
 #define GD_FLG_SPL_EARLY_INIT	0x04000 /* Early SPL init is done	   */
 #define GD_FLG_LOG_READY	0x08000 /* Log system is ready for use	   */
+#define GD_FLG_KDTB_READY	0x10000 /* Kernel dtb is ready for use	   */
 
 #ifdef CONFIG_ARCH_ROCKCHIP
 /* BL32 is enabled */

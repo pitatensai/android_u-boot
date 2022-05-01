@@ -10,74 +10,16 @@ JOB=`sed -n "N;/processor/p" /proc/cpuinfo|wc -l`
 SUPPORT_LIST=`ls configs/*[r,p][x,v,k][0-9][0-9]*_defconfig`
 CMD_ARGS=$1
 
-# @LOADER: map to $RKCHIP_LOADER for loader ini
-# @TRUST:  map to $RKCHIP_TRUST for trust ini
-# @LABEL:  map to $RKCHIP_LEBEL for verbose message
-# @-:      default state/value
-CHIP_TYPE_FIXUP_TABLE=(
-	# CONFIG_XXX                         RKCHIP         LOADER       TRUST         LABEL
-	"CONFIG_ROCKCHIP_RK3368              RK3368H         -            -             -"
-	"CONFIG_ROCKCHIP_RV1108              RV110X          -            -             -"
-	"CONFIG_ROCKCHIP_PX3SE               PX3SE           -            -             -"
-	"CONFIG_ROCKCHIP_RK3126              RK3126          -            -             -"
-	"CONFIG_ROCKCHIP_RK3326              RK3326          -            -             -"
-	"CONFIG_ROCKCHIP_RK3128X             RK3128X         -            -             -"
-	"CONFIG_ROCKCHIP_PX5                 PX5             -            -             -"
-	"CONFIG_ROCKCHIP_RK3399PRO           RK3399PRO       -            -             -"
-	"CONFIG_ROCKCHIP_RK1806              RK1806          -            -             -"
-	"CONFIG_TARGET_GVA_RK3229            RK322X          RK322XAT     -             -"
-	"CONFIG_COPROCESSOR_RK1808           RKNPU-LION      RKNPULION    RKNPULION     -"
-)
-
-# <*> Fixup rsa/sha pack mode for platforms
-#     RSA: RK3308/PX30/RK3326/RK1808 use RSA-PKCS1 V2.1, it's pack magic is "3", and others use default configure.
-#     SHA: RK3368 use rk big endian SHA256, it's pack magic is "2", and others use default configure.
-# <*> Fixup images size pack for platforms
-# <*> Fixup verbose message about AARCH32
-#
-# @RSA:     rsa mode
-# @SHA:     sha mode
-# @A64-KB:  arm64 platform image size: [uboot,trust]
-# @A64-NUM: arm64 platform image number of total: [uboot,trust]
-# @A32-KB:  arm32 platform image size: [uboot,trust]
-# @A32-NUM: arm32 platform image number of total: [uboot,trust]
-# @LOADER:  map to $RKCHIP_LOADER for loader ini
-# @TRUST:   map to $RKCHIP_TRUST for trust ini
-# @-:       default state/value
-CHIP_CFG_FIXUP_TABLE=(
-	# CONFIG_XXX              RSA     SHA     A64-KB      A64-NUM     A32-KB       A32-NUM      LOAER        TRUST
-	"CONFIG_ROCKCHIP_RK3368    -       2       -,-          -,-        -,-          -,-           -           -"
-	"CONFIG_ROCKCHIP_RK3036    -       -       512,512      1,1        -,-          -,-           -           -"
-	"CONFIG_ROCKCHIP_PX30      3       -       -,-          -,-        -,-          -,-           -           -"
-	"CONFIG_ROCKCHIP_RK3326    3       -       -,-          -,-        -,-          -,-           AARCH32     -"
-	"CONFIG_ROCKCHIP_RK3308    3       -       1024,1024    2,2        512,512      2,2           -           AARCH32"
-	"CONFIG_ROCKCHIP_RK1808    3       -       1024,1024    2,2        -,-          -,-           -           -"
-	"CONFIG_ROCKCHIP_RV1126    3       -       -,-          -,-        -,-          -,-           -           -"
-)
-
 ########################################### User can modify #############################################
-# User's rkbin tool relative path
 RKBIN_TOOLS=../rkbin/tools
-
-# User's GCC toolchain and relative path
-ADDR2LINE_ARM32=arm-linux-gnueabihf-addr2line
-ADDR2LINE_ARM64=aarch64-linux-gnu-addr2line
-OBJ_ARM32=arm-linux-gnueabihf-objdump
-OBJ_ARM64=aarch64-linux-gnu-objdump
-NM_ARM32=arm-linux-gnueabihf-nm
-NM_ARM64=aarch64-linux-gnu-nm
-GCC_ARM32=arm-linux-gnueabihf-
-GCC_ARM64=aarch64-linux-gnu-
-TOOLCHAIN_ARM32=../prebuilts/gcc/linux-x86/arm/gcc-linaro-6.3.1-2017.05-x86_64_arm-linux-gnueabihf/bin
-TOOLCHAIN_ARM64=../prebuilts/gcc/linux-x86/aarch64/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/bin
-
+CROSS_COMPILE_ARM32=../prebuilts/gcc/linux-x86/arm/gcc-linaro-6.3.1-2017.05-x86_64_arm-linux-gnueabihf/bin/arm-linux-gnueabihf-
+CROSS_COMPILE_ARM64=../prebuilts/gcc/linux-x86/aarch64/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-
 ########################################### User not touch #############################################
 # Declare global INI file searching index name for every chip, update in select_chip_info()
-RKCHIP="-"
-RKCHIP_LABEL="-"
-RKCHIP_LOADER="-"
-RKCHIP_TRUST="-"
-
+RKCHIP=
+RKCHIP_LABEL=
+RKCHIP_LOADER=
+RKCHIP_TRUST=
 INI_TRUST=
 INI_LOADER=
 
@@ -85,7 +27,7 @@ INI_LOADER=
 RKBIN=
 
 # Declare global toolchain path for CROSS_COMPILE, updated in select_toolchain()
-TOOLCHAIN_GCC=
+TOOLCHAIN=
 TOOLCHAIN_NM=
 TOOLCHAIN_OBJDUMP=
 TOOLCHAIN_ADDR2LINE=
@@ -104,7 +46,7 @@ SCRIPT_TOS="${SRCTREE}/scripts/tos.sh"
 SCRIPT_SPL="${SRCTREE}/scripts/spl.sh"
 SCRIPT_UBOOT="${SRCTREE}/scripts/uboot.sh"
 SCRIPT_LOADER="${SRCTREE}/scripts/loader.sh"
-
+CC_FILE=".cc"
 REP_DIR="./rep"
 #########################################################################################################
 function help()
@@ -176,6 +118,17 @@ function process_args()
 			*help|--h|-h)
 				help
 				exit 0
+				;;
+			CROSS_COMPILE=*)  # set CROSS_COMPILE
+				ARG_COMPILE="y"
+				CROSS_COMPILE_ARM32=${1#*=}
+				CROSS_COMPILE_ARM64=${1#*=}
+				if [ ${CMD_ARGS} == $1 ]; then
+					shift 1
+					CMD_ARGS=$1
+				else
+					shift 1
+				fi
 				;;
 			# '': build with exist .config
 			# loader|trust|uboot: pack image
@@ -276,10 +229,12 @@ function process_args()
 						MAKE_CMD="make ${BASE0_DEFCONFIG} ${BASE1_DEFCONFIG} ${ARG_BOARD}.config -j${JOB}"
 						echo "## ${MAKE_CMD}"
 						make ${BASE0_DEFCONFIG} ${BASE1_DEFCONFIG} ${ARG_BOARD}.config ${OPTION}
+						rm -f ${CC_FILE}
 					else
 						MAKE_CMD="make ${ARG_BOARD}_defconfig -j${JOB}"
 						echo "## ${MAKE_CMD}"
 						make ${ARG_BOARD}_defconfig ${OPTION}
+						rm -f ${CC_FILE}
 					fi
 				fi
 				shift 1
@@ -297,28 +252,40 @@ function process_args()
 
 function select_toolchain()
 {
+	# If no outer CROSS_COMPILE, look for it from CC_FILE.
+	if [ "${ARG_COMPILE}" != "y" ]; then
+		if [ -f ${CC_FILE} ]; then
+			CROSS_COMPILE_ARM32=`cat ${CC_FILE}`
+			CROSS_COMPILE_ARM64=`cat ${CC_FILE}`
+		else
+			if grep -q '^CONFIG_ARM64=y' .config ; then
+				CROSS_COMPILE_ARM64=$(cd `dirname ${CROSS_COMPILE_ARM64}`; pwd)"/aarch64-linux-gnu-"
+			else
+				CROSS_COMPILE_ARM32=$(cd `dirname ${CROSS_COMPILE_ARM32}`; pwd)"/arm-linux-gnueabihf-"
+			fi
+		fi
+	fi
+
 	if grep -q '^CONFIG_ARM64=y' .config ; then
-		if [ -d ${TOOLCHAIN_ARM64} ]; then
-			absolute_path=$(cd `dirname ${TOOLCHAIN_ARM64}`; pwd)
-			TOOLCHAIN_NM=${absolute_path}/bin/${NM_ARM64}
-			TOOLCHAIN_GCC=${absolute_path}/bin/${GCC_ARM64}
-			TOOLCHAIN_OBJDUMP=${absolute_path}/bin/${OBJ_ARM64}
-			TOOLCHAIN_ADDR2LINE=${absolute_path}/bin/${ADDR2LINE_ARM64}
-		else
-			echo "ERROR: No toolchain: ${TOOLCHAIN_ARM64}"
-			exit 1
-		fi
+		TOOLCHAIN=${CROSS_COMPILE_ARM64}
+		TOOLCHAIN_NM=${CROSS_COMPILE_ARM64}nm
+		TOOLCHAIN_OBJDUMP=${CROSS_COMPILE_ARM64}objdump
+		TOOLCHAIN_ADDR2LINE=${CROSS_COMPILE_ARM64}addr2line
 	else
-		if [ -d ${TOOLCHAIN_ARM32} ]; then
-			absolute_path=$(cd `dirname ${TOOLCHAIN_ARM32}`; pwd)
-			TOOLCHAIN_NM=${absolute_path}/bin/${NM_ARM32}
-			TOOLCHAIN_GCC=${absolute_path}/bin/${GCC_ARM32}
-			TOOLCHAIN_OBJDUMP=${absolute_path}/bin/${OBJ_ARM32}
-			TOOLCHAIN_ADDR2LINE=${absolute_path}/bin/${ADDR2LINE_ARM32}
-		else
-			echo "ERROR: No toolchain: ${TOOLCHAIN_ARM32}"
-			exit 1
-		fi
+		TOOLCHAIN=${CROSS_COMPILE_ARM32}
+		TOOLCHAIN_NM=${CROSS_COMPILE_ARM32}nm
+		TOOLCHAIN_OBJDUMP=${CROSS_COMPILE_ARM32}objdump
+		TOOLCHAIN_ADDR2LINE=${CROSS_COMPILE_ARM32}addr2line
+	fi
+
+	if [ ! `which ${TOOLCHAIN}gcc` ]; then
+		echo "ERROR: No find ${TOOLCHAIN}gcc"
+		exit 1
+	fi
+
+	# save to CC_FILE
+	if [ "${ARG_COMPILE}" == "y" ]; then
+		echo "${TOOLCHAIN}" > ${CC_FILE}
 	fi
 }
 
@@ -341,25 +308,10 @@ function select_chip_info()
 
 	# default
 	RKCHIP=${RKCHIP##*_}
-	# fixup ?
-	for item in "${CHIP_TYPE_FIXUP_TABLE[@]}"
-	do
-		CONFIG_ROCKCHIP_XXX=`echo ${item} | awk '{ print $1 }'`
-		if grep  -q "^${CONFIG_ROCKCHIP_XXX}=y" .config ; then
-			RKCHIP=`echo ${item} | awk '{ print $2 }'`
-			RKCHIP_LOADER=`echo ${item} | awk '{ print $3 }'`
-			RKCHIP_TRUST=`echo  ${item} | awk '{ print $4 }'`
-			RKCHIP_LABEL=`echo  ${item} | awk '{ print $5 }'`
-		fi
-	done
-
-	if [ "${RKCHIP_LOADER}" == "-" ]; then
-		RKCHIP_LOADER=${RKCHIP}
-	fi
-	if [ "${RKCHIP_TRUST}" == "-" ]; then
-		RKCHIP_TRUST=${RKCHIP}
-	fi
-	if [ "${RKCHIP_LABEL}" == "-" ]; then
+	RKCHIP_LOADER=${RKCHIP}
+	RKCHIP_TRUST=${RKCHIP}
+	RKCHIP_LABEL=`sed -n "/CONFIG_CHIP_NAME=/s/CONFIG_CHIP_NAME=//p" .config |tr -d '\r' | tr -d '"'`
+	if [ -z "${RKCHIP_LABEL}" ]; then
 		RKCHIP_LABEL=${RKCHIP}
 	fi
 }
@@ -367,67 +319,28 @@ function select_chip_info()
 # Priority: default < CHIP_CFG_FIXUP_TABLE() < make.sh args
 function fixup_platform_configure()
 {
-	U_KB="-" U_NUM="-" T_KB="-" T_NUM="-"  SHA="-" RSA="-"
+	U_KB=`sed -n "/CONFIG_UBOOT_SIZE_KB=/s/CONFIG_UBOOT_SIZE_KB=//p" .config |tr -d '\r' | tr -d '"'`
+	U_NUM=`sed -n "/CONFIG_UBOOT_NUM=/s/CONFIG_UBOOT_NUM=//p" .config |tr -d '\r' | tr -d '"'`
+	T_KB=`sed -n "/CONFIG_TRUST_SIZE_KB=/s/CONFIG_TRUST_SIZE_KB=//p" .config |tr -d '\r' | tr -d '"'`
+	T_NUM=`sed -n "/CONFIG_TRUST_NUM=/s/CONFIG_TRUST_NUM=//p" .config |tr -d '\r' | tr -d '"'`
+	SHA=`sed -n "/CONFIG_TRUST_SHA_MODE=/s/CONFIG_TRUST_SHA_MODE=//p" .config |tr -d '\r' | tr -d '"'`
+	RSA=`sed -n "/CONFIG_TRUST_RSA_MODE=/s/CONFIG_TRUST_RSA_MODE=//p" .config |tr -d '\r' | tr -d '"'`
 
-	for item in "${CHIP_CFG_FIXUP_TABLE[@]}"
-	do
-		config_xxx=`echo ${item} | awk '{ print $1 }'`
-		if grep  -q "^${config_xxx}=y" .config ; then
-			# <*> Fixup rsa/sha pack mode for platforms
-			RSA=`echo ${item} | awk '{ print $2 }'`
-			SHA=`echo ${item} | awk '{ print $3 }'`
+	# .config
+	PLAT_UBOOT_SIZE="--size ${U_KB} ${U_NUM}"
+	PLAT_TRUST_SIZE="--size ${T_KB} ${T_NUM}"
+	PLAT_SHA="--sha ${SHA}"
+	PLAT_RSA="--rsa ${RSA}"
 
-			# <*> Fixup images size pack for platforms, and ini file
-			if grep -q '^CONFIG_ARM64=y' .config ; then
-				U_KB=`echo  ${item} | awk '{ print $4 }' | awk -F "," '{ print $1 }'`
-				T_KB=`echo  ${item} | awk '{ print $4 }' | awk -F "," '{ print $2 }'`
-				U_NUM=`echo ${item} | awk '{ print $5 }' | awk -F "," '{ print $1 }'`
-				T_NUM=`echo ${item} | awk '{ print $5 }' | awk -F "," '{ print $2 }'`
-			else
-				U_KB=`echo  ${item} | awk '{ print $6 }' | awk -F "," '{ print $1 }'`
-				T_KB=`echo  ${item} | awk '{ print $6 }' | awk -F "," '{ print $2 }'`
-				U_NUM=`echo ${item} | awk '{ print $7 }' | awk -F "," '{ print $1 }'`
-				T_NUM=`echo ${item} | awk '{ print $7 }' | awk -F "," '{ print $2 }'`
-				# AArch32
-				if grep -q '^CONFIG_ARM64_BOOT_AARCH32=y' .config ; then
-					PADDING=`echo ${item} | awk '{ print $8 }'`
-					if [ "${PADDING}" != "-" ]; then
-						RKCHIP_LOADER=${RKCHIP_LOADER}${PADDING}
-					fi
-					PADDING=`echo  ${item} | awk '{ print $9 }'`
-					if [ "${PADDING}" != "-" ]; then
-						RKCHIP_TRUST=${RKCHIP_TRUST}${PADDING}
-					fi
-					RKCHIP_LABEL=${RKCHIP_LABEL}"AARCH32"
-				fi
-			fi
-		fi
-	done
-
-	if [ "${SHA}" != "-" ]; then
-		PLAT_SHA="--sha ${SHA}"
-	fi
-	if [ "${RSA}" != "-" ]; then
-		PLAT_RSA="--rsa ${RSA}"
-	fi
-	if [ "${U_KB}" != "-" ]; then
-		PLAT_UBOOT_SIZE="--size ${U_KB} ${U_NUM}"
-	fi
-	if [ "${T_KB}" != "-" ]; then
-		PLAT_TRUST_SIZE="--size ${T_KB} ${T_NUM}"
-	fi
-
-	# args
+	# ./make.sh args
 	if [ ! -z "${ARG_UBOOT_SIZE}" ]; then
 		PLAT_UBOOT_SIZE=${ARG_UBOOT_SIZE}
 	fi
-
 	if [ ! -z "${ARG_TRUST_SIZE}" ]; then
 		PLAT_TRUST_SIZE=${ARG_TRUST_SIZE}
 	fi
 }
 
-# Priority: default < CHIP_TYPE_FIXUP_TABLE() < defconfig < make.sh args
 function select_ini_file()
 {
 	# default
@@ -524,7 +437,7 @@ function sub_commands()
 			exit 0
 			;;
 		env)
-			make CROSS_COMPILE=${TOOLCHAIN_GCC} envtools
+			make CROSS_COMPILE=${TOOLCHAIN} envtools
 			exit 0
 			;;
 		--idblock)
@@ -646,18 +559,51 @@ function pack_uboot_itb_image()
 		TEE_ARG="-t ${TEE_OFFSET}"
 	fi
 
-	# MCU
-	MCU_ENABLED=`awk -F"," '/MCU=/ { printf $3 }' ${INI} | tr -d ' '`
-	if [ "${MCU_ENABLED}" == "enabled" -o "${MCU_ENABLED}" == "okay" ]; then
-		MCU=`awk -F"," '/MCU=/  { printf $1 }' ${INI} | tr -d ' ' | cut -c 5-`
-		cp ${RKBIN}/${MCU} mcu.bin
-		MCU_OFFSET=`awk -F"," '/MCU=/ { printf $2 }' ${INI} | tr -d ' '`
-		if [ -z ${MCU_OFFSET} ]; then
-			echo "ERROR: No mcu address in ${INI}"
-			exit 1
+	# MCUs
+	for ((i=0; i<5; i++))
+	do
+		MCU_BIN="mcu${i}.bin"
+		MCU_IDX="MCU${i}"
+
+		# compatible: use "MCU" to replace "MCU0" if "MCU" is present.
+		ENABLED=`awk -F"," '/MCU=/  { printf $3 }' ${INI} | tr -d ' '`
+		if [ ${i} -eq 0 ]; then
+			ENABLED=`awk -F"," '/MCU=/  { printf $3 }' ${INI} | tr -d ' '`
+			if [ ! -z ${ENABLED} ]; then
+				MCU_IDX="MCU"
+			fi
 		fi
-		MCU_ARG="-m ${MCU_OFFSET}"
-	fi
+
+		ENABLED=`awk -F "," '/'${MCU_IDX}'=/  { printf $3 }' ${INI} | tr -d ' '`
+		if [ "${ENABLED}" == "enabled" -o "${ENABLED}" == "okay" ]; then
+			NAME=`awk -F "," '/'${MCU_IDX}'=/ { printf $1 }' ${INI} | tr -d ' ' | awk -F "=" '{ print $2 }'`
+			OFFS=`awk -F "," '/'${MCU_IDX}'=/ { printf $2 }' ${INI} | tr -d ' '`
+			cp ${RKBIN}/${NAME} ${MCU_BIN}
+			if [ -z ${OFFS} ]; then
+				echo "ERROR: No ${MCU_BIN} address in ${INI}"
+				exit 1
+			fi
+			MCU_ARG=${MCU_ARG}" -m${i} ${OFFS}"
+		fi
+	done
+
+	# Loadables
+	for ((i=0; i<5; i++))
+	do
+		LOAD_BIN="load${i}.bin"
+		LOAD_IDX="LOAD${i}"
+		ENABLED=`awk -F "," '/'${LOAD_IDX}'=/  { printf $3 }' ${INI} | tr -d ' '`
+		if [ "${ENABLED}" == "enabled" -o "${ENABLED}" == "okay" ]; then
+			NAME=`awk -F "," '/'${LOAD_IDX}'=/ { printf $1 }' ${INI} | tr -d ' ' | awk -F "=" '{ print $2 }'`
+			OFFS=`awk -F "," '/'${LOAD_IDX}'=/ { printf $2 }' ${INI} | tr -d ' '`
+			cp ${RKBIN}/${NAME} ${LOAD_BIN}
+			if [ -z ${OFFS} ]; then
+				echo "ERROR: No ${LOAD_BIN} address in ${INI}"
+				exit 1
+			fi
+			LOAD_ARG=${LOAD_ARG}" -l${i} ${OFFS}"
+		fi
+	done
 
 	# COMPRESSION
 	COMPRESSION=`awk -F"," '/COMPRESSION=/  { printf $1 }' ${INI} | tr -d ' ' | cut -c 13-`
@@ -678,7 +624,7 @@ function pack_uboot_itb_image()
 		if [[ ${SPL_FIT_GENERATOR} == *.py ]]; then
 			${SPL_FIT_GENERATOR} u-boot.dtb > u-boot.its
 		else
-			${SPL_FIT_GENERATOR} ${TEE_ARG} ${COMPRESSION_ARG} ${MCU_ARG} > u-boot.its
+			${SPL_FIT_GENERATOR} ${TEE_ARG} ${COMPRESSION_ARG} ${MCU_ARG} ${LOAD_ARG} > u-boot.its
 		fi
 	fi
 
@@ -757,13 +703,6 @@ function pack_fit_image()
 		exit 1
 	fi
 
-	if [ "${ARM64_TRUSTZONE}" == "y" ]; then
-		if ! python -c "import elftools" ; then
-			echo "ERROR: No python 'pyelftools', please: pip install pyelftools"
-			exit 1
-		fi
-	fi
-
 	# If we don't plan to have uboot in uboot.img in case of: SPL => Trust => Kernel, creating empty files.
 	if [ "${ARG_NO_UBOOT}" == "y" ]; then
 		rm u-boot-nodtb.bin u-boot.dtb -f
@@ -771,15 +710,7 @@ function pack_fit_image()
 	fi
 
 	rm uboot.img trust*.img -rf
-	${SCRIPT_FIT} ${ARG_LIST_FIT}
-
-	if [ "${ARM64_TRUSTZONE}" == "y" ]; then
-		if ! fdtget -l uboot.img /images/atf-1 >/dev/null 2>&1 ; then
-			echo -e "\nERROR: Invalid uboot.img, please install: \"pip install pyelftools\""
-			echo
-			exit 1
-		fi
-	fi
+	${SCRIPT_FIT} ${ARG_LIST_FIT} --chip ${RKCHIP_LABEL}
 
 	rm ${REP_DIR} -rf
 	echo "pack uboot.img okay! Input: ${INI_TRUST}"
@@ -828,6 +759,8 @@ select_ini_file
 handle_args_late
 sub_commands
 clean_files
-make PYTHON=python2 CROSS_COMPILE=${TOOLCHAIN_GCC} all --jobs=${JOB}
+make PYTHON=python2 CROSS_COMPILE=${TOOLCHAIN} all --jobs=${JOB}
 pack_images
 finish
+echo ${TOOLCHAIN}
+date

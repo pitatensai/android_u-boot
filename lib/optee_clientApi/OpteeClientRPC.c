@@ -236,6 +236,7 @@ Exit:
  */
 
 uint16_t global_block_count;
+#ifdef CONFIG_SUPPORT_EMMC_RPMB
 TEEC_Result OpteeRpcCmdRpmb(t_teesmc32_arg *TeeSmc32Arg)
 {
 	struct tee_rpc_rpmb_dev_info *DevInfo;
@@ -345,11 +346,7 @@ TEEC_Result OpteeRpcCmdRpmb(t_teesmc32_arg *TeeSmc32Arg)
 				break;
 			}
 
-			if (EfiStatus != 0) {
-				TeecResult = TEEC_ERROR_GENERIC;
-				break;
-			}
-
+			TeecResult = TEEC_SUCCESS;
 			break;
 		}
 
@@ -507,6 +504,7 @@ Exit:
 
 	return TeecResult;
 }
+#endif
 
 /*
  * Execute a normal world local file system operation.
@@ -520,12 +518,13 @@ TEEC_Result OpteeRpcCmdFs(t_teesmc32_arg *TeeSmc32Arg)
 #ifdef CONFIG_OPTEE_V1
 	TeecResult = OpteeClientRkFsProcess((void *)(size_t)TeeSmc32Param[0].u.memref.buf_ptr,
 							TeeSmc32Param[0].u.memref.size);
+	TeeSmc32Arg->ret = TEEC_SUCCESS;
 #endif
 #ifdef CONFIG_OPTEE_V2
 	TeecResult = OpteeClientRkFsProcess((size_t)TeeSmc32Arg->num_params,
 							(struct tee_ioctl_param *)TeeSmc32Param);
+	TeeSmc32Arg->ret = TeecResult;
 #endif
-
 	return TeecResult;
 }
 
@@ -607,13 +606,14 @@ TEEC_Result OpteeRpcCallback(ARM_SMC_ARGS *ArmSmcArgs)
 			break;
 
 		}
+#ifdef CONFIG_SUPPORT_EMMC_RPMB
 		case OPTEE_MSG_RPC_CMD_RPMB_V2: {
 			TeecResult = OpteeRpcCmdRpmb(TeeSmc32Arg);
 			break;
 		}
+#endif
 		case OPTEE_MSG_RPC_CMD_FS_V2: {
 			TeecResult = OpteeRpcCmdFs(TeeSmc32Arg);
-			TeeSmc32Arg->ret = TEEC_SUCCESS;
 			break;
 		}
 		case OPTEE_MSG_RPC_CMD_LOAD_TA_V2: {

@@ -199,7 +199,6 @@ static int dwmci_data_transfer(struct dwmci_host *host, struct mmc_data *data)
 		/* Error during data transfer. */
 		if (mask & (DWMCI_DATA_ERR | DWMCI_DATA_TOUT)) {
 			debug("%s: DATA ERROR!\n", __func__);
-
 			dwmci_wait_reset(host, DWMCI_RESET_ALL);
 			dwmci_writel(host, DWMCI_CMD, DWMCI_CMD_PRV_DAT_WAIT |
 				     DWMCI_CMD_UPD_CLK | DWMCI_CMD_START);
@@ -353,14 +352,20 @@ static int dwmci_send_cmd(struct mmc *mmc, struct mmc_cmd *cmd,
 			dwmci_wait_reset(host, DWMCI_CTRL_FIFO_RESET);
 		} else {
 			if (data->flags == MMC_DATA_READ) {
-				bounce_buffer_start(&bbstate, (void*)data->dest,
+				ret = bounce_buffer_start(&bbstate,
+						(void*)data->dest,
 						data->blocksize *
 						data->blocks, GEN_BB_WRITE);
 			} else {
-				bounce_buffer_start(&bbstate, (void*)data->src,
+				ret = bounce_buffer_start(&bbstate,
+						(void*)data->src,
 						data->blocksize *
 						data->blocks, GEN_BB_READ);
 			}
+
+			if (ret)
+				return ret;
+
 			dwmci_prepare_data(host, data, cur_idmac,
 					   bbstate.bounce_buffer);
 		}
@@ -447,8 +452,6 @@ static int dwmci_send_cmd(struct mmc *mmc, struct mmc_cmd *cmd,
 			bounce_buffer_stop(&bbstate);
 		}
 	}
-
-	udelay(100);
 
 	return ret;
 }
@@ -603,6 +606,9 @@ static int dwmci_setup_bus(struct dwmci_host *host, u32 freq)
 		debug("%s: Didn't get source clock value.\n", __func__);
 		return -EINVAL;
 	}
+
+	if (sclk == 0)
+		return -EINVAL;
 
 	if (sclk == freq)
 		div = 0;	/* bypass mode */
@@ -788,8 +794,8 @@ static int dwmci_init(struct mmc *mmc)
 static int dwmci_get_cd(struct udevice *dev)
 {
 	int ret = -1;
-#ifndef CONFIG_SPL_BUILD
-#ifdef CONFIG_DM_GPIO
+
+#if defined(CONFIG_DM_GPIO) && (defined(CONFIG_SPL_GPIO_SUPPORT) || !defined(CONFIG_SPL_BUILD))
 	struct gpio_desc detect;
 
 	ret = gpio_request_by_name(dev, "cd-gpios", 0, &detect, GPIOD_IS_IN);
@@ -798,7 +804,7 @@ static int dwmci_get_cd(struct udevice *dev)
 	}
 
 	ret = !dm_gpio_get_value(&detect);
-#endif
+	dm_gpio_free(dev, &detect);
 #endif
 	return ret;
 }
@@ -847,11 +853,21 @@ void dwmci_setup_cfg(struct mmc_config *cfg, struct dwmci_host *host,
 
 	cfg->host_caps = host->caps;
 
-	if (host->buswidth == 8) {
+	switch (host->buswidth) {
+	case 8:
 		cfg->host_caps |= MMC_MODE_8BIT | MMC_MODE_4BIT;
-	} else {
+		break;
+	case 4:
 		cfg->host_caps |= MMC_MODE_4BIT;
 		cfg->host_caps &= ~MMC_MODE_8BIT;
+		break;
+	case 1:
+		cfg->host_caps &= ~MMC_MODE_4BIT;
+		cfg->host_caps &= ~MMC_MODE_8BIT;
+		break;
+	default:
+		printf("Unsupported bus width: %d\n", host->buswidth);
+		break;
 	}
 	cfg->host_caps |= MMC_MODE_HS | MMC_MODE_HS_52MHz;
 

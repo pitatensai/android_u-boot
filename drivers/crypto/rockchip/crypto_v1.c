@@ -7,6 +7,7 @@
 #include <clk.h>
 #include <crypto.h>
 #include <dm.h>
+#include <reset.h>
 #include <rockchip/crypto_hash_cache.h>
 #include <rockchip/crypto_v1.h>
 #include <asm/io.h>
@@ -18,19 +19,20 @@
 #define HASH_UPDATE_LIMIT	(32 * 1024 * 1024)
 #define RK_CRYPTO_TIME_OUT	500000
 
-#define LLI_ADDR_ALIGIN_SIZE	8
-#define DATA_ADDR_ALIGIN_SIZE	8
-#define DATA_LEN_ALIGIN_SIZE	64
+#define LLI_ADDR_ALIGN_SIZE	8
+#define DATA_ADDR_ALIGN_SIZE	8
+#define DATA_LEN_ALIGN_SIZE	64
 
 struct rockchip_crypto_priv {
 	struct crypto_hash_cache	*hash_cache;
-	struct rk_crypto_reg *reg;
-	struct clk clk;
-	sha_context *ctx;
-	u32 frequency;
-	char *clocks;
-	u32 nclocks;
-	u32 length;
+	struct rk_crypto_reg		*reg;
+	struct clk			clk;
+	struct reset_ctl_bulk		rsts;
+	sha_context			*ctx;
+	u32				frequency;
+	char				*clocks;
+	u32				nclocks;
+	u32				length;
 };
 
 static u32 rockchip_crypto_capability(struct udevice *dev)
@@ -89,8 +91,8 @@ static int rockchip_crypto_sha_init(struct udevice *dev, sha_context *ctx)
 
 	priv->hash_cache = crypto_hash_cache_alloc(rk_hash_direct_calc,
 						   priv, ctx->length,
-						   DATA_ADDR_ALIGIN_SIZE,
-						   DATA_LEN_ALIGIN_SIZE);
+						   DATA_ADDR_ALIGN_SIZE,
+						   DATA_LEN_ALIGN_SIZE);
 	if (!priv->hash_cache)
 		return -EFAULT;
 
@@ -226,6 +228,12 @@ static int rockchip_crypto_rsa_verify(struct udevice *dev, rsa_key *ctx,
 	else
 		return -EINVAL;
 
+	if (priv->rsts.resets && priv->rsts.count) {
+		reset_assert_bulk(&priv->rsts);
+		udelay(10);
+		reset_deassert_bulk(&priv->rsts);
+	}
+
 	/* Specify the nbits of N in PKA calculation */
 	writel(value, &reg->crypto_pka_ctrl);
 
@@ -303,6 +311,9 @@ static int rockchip_crypto_ofdata_to_platdata(struct udevice *dev)
 	priv->reg = dev_read_addr_ptr(dev);
 	priv->frequency = dev_read_u32_default(dev, "clock-frequency",
 					       CRYPTO_V1_DEFAULT_RATE);
+
+	memset(&priv->rsts, 0x00, sizeof(priv->rsts));
+	reset_get_bulk(dev, &priv->rsts);
 
 	return 0;
 }

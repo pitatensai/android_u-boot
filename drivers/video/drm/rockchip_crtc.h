@@ -7,12 +7,24 @@
 #ifndef _ROCKCHIP_CRTC_H_
 #define _ROCKCHIP_CRTC_H_
 
+#define VOP2_MAX_VP				4
+
+struct rockchip_vp {
+	bool enable;
+	u8 bg_ovl_dly;
+	int output_type;
+	u32 plane_mask;
+	int cursor_plane;
+};
+
 struct rockchip_crtc {
 	const struct rockchip_crtc_funcs *funcs;
 	const void *data;
 	struct drm_display_mode active_mode;
+	struct rockchip_vp vps[4];
 	bool hdmi_hpd : 1;
 	bool active : 1;
+	bool assign_plane : 1;
 };
 
 struct rockchip_crtc_funcs {
@@ -48,4 +60,5 @@ extern const struct vop_data rk3328_vop;
 extern const struct vop_data rv1108_vop;
 extern const struct vop_data rv1126_vop;
 extern const struct vop2_data rk3568_vop;
+extern const struct vop2_data rk3588_vop;
 #endif

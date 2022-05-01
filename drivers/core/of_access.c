@@ -387,6 +387,16 @@ struct device_node *of_find_node_by_phandle(phandle handle)
 	for_each_of_allnodes(np)
 		if (np->phandle == handle)
 			break;
+
+#ifdef CONFIG_USING_KERNEL_DTB_V2
+	/* If not find in kernel fdt, traverse u-boot fdt */
+	if (!np) {
+		for (np = gd->of_root_f; np; np = of_find_all_nodes(np)) {
+			if (np->phandle == handle)
+				break;
+		}
+	}
+#endif
 	(void)of_node_get(np);
 
 	return np;
@@ -731,6 +741,10 @@ static void of_alias_add(struct alias_prop *ap, struct device_node *np,
 	mutex_lock(&of_mutex);
 	list_for_each_entry(oldap, &aliases_lookup, link) {
 		if (stem && !strcmp(stem, oldap->alias) && (id == oldap->id)) {
+			/* Always use from U-Boot aliase */
+			if (strcmp(stem, "mmc"))
+				continue;
+
 			list_del(&oldap->link);
 			break;
 		}

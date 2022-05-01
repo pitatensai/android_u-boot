@@ -12,9 +12,23 @@
 #include <edid.h>
 #include <dm/ofnode.h>
 
+/*
+ * major: IP major vertion, used for IP structure
+ * minor: big feature change under same structure
+ */
+#define VOP_VERSION(major, minor)	((major) << 8 | (minor))
+#define VOP_MAJOR(version)		((version) >> 8)
+#define VOP_MINOR(version)		((version) & 0xff)
+
+#define VOP_VERSION_RK3568		VOP_VERSION(0x40, 0x15)
+#define VOP_VERSION_RK3588		VOP_VERSION(0x40, 0x17)
+
 #define ROCKCHIP_OUTPUT_DUAL_CHANNEL_LEFT_RIGHT_MODE	BIT(0)
 #define ROCKCHIP_OUTPUT_DUAL_CHANNEL_ODD_EVEN_MODE	BIT(1)
 #define ROCKCHIP_OUTPUT_DATA_SWAP			BIT(2)
+#define ROCKCHIP_OUTPUT_MIPI_DS_MODE			BIT(3)
+
+#define ROCKCHIP_DSC_PPS_SIZE_BYTE			88
 
 enum data_format {
 	ROCKCHIP_FMT_ARGB8888 = 0,
@@ -45,14 +59,16 @@ enum rockchip_mcu_cmd {
 /*
  * display output interface supported by rockchip lcdc
  */
-#define ROCKCHIP_OUT_MODE_P888	0
-#define ROCKCHIP_OUT_MODE_P666	1
-#define ROCKCHIP_OUT_MODE_P565	2
+#define ROCKCHIP_OUT_MODE_P888		0
+#define ROCKCHIP_OUT_MODE_BT1120	0
+#define ROCKCHIP_OUT_MODE_P666		1
+#define ROCKCHIP_OUT_MODE_P565		2
+#define ROCKCHIP_OUT_MODE_BT656		5
 #define ROCKCHIP_OUT_MODE_S888		8
 #define ROCKCHIP_OUT_MODE_S888_DUMMY	12
 #define ROCKCHIP_OUT_MODE_YUV420	14
 /* for use special outface */
-#define ROCKCHIP_OUT_MODE_AAAA	15
+#define ROCKCHIP_OUT_MODE_AAAA		15
 
 #define VOP_OUTPUT_IF_RGB	BIT(0)
 #define VOP_OUTPUT_IF_BT1120	BIT(1)
@@ -82,11 +98,33 @@ struct vop_rect {
 	int height;
 };
 
+struct rockchip_dsc_sink_cap {
+	/**
+	 * @slice_width: the number of pixel columns that comprise the slice width
+	 * @slice_height: the number of pixel rows that comprise the slice height
+	 * @block_pred: Does block prediction
+	 * @native_420: Does sink support DSC with 4:2:0 compression
+	 * @bpc_supported: compressed bpc supported by sink : 10, 12 or 16 bpc
+	 * @version_major: DSC major version
+	 * @version_minor: DSC minor version
+	 * @target_bits_per_pixel_x16: bits num after compress and multiply 16
+	 */
+	u16 slice_width;
+	u16 slice_height;
+	bool block_pred;
+	bool native_420;
+	u8 bpc_supported;
+	u8 version_major;
+	u8 version_minor;
+	u16 target_bits_per_pixel_x16;
+};
+
 struct crtc_state {
 	struct udevice *dev;
 	struct rockchip_crtc *crtc;
 	void *private;
 	ofnode node;
+	struct device_node *ports_node; /* if (ports_node) it's vop2; */
 	int crtc_id;
 
 	int format;
@@ -105,6 +143,7 @@ struct crtc_state {
 	bool yuv_overlay;
 	struct rockchip_mcu_timing mcu_timing;
 	u32 dual_channel_swap;
+	u32 feature;
 	struct vop_rect max_output;
 };
 
@@ -139,7 +178,26 @@ struct connector_state {
 	int output_if;
 	int output_flags;
 	int color_space;
+	int dsc_enable;
 	unsigned int bpc;
+
+	/**
+	 * @hold_mode: enabled when it's:
+	 * (1) mcu hold mode
+	 * (2) mipi dsi cmd mode
+	 * (3) edp psr mode
+	 */
+	bool hold_mode;
+
+	struct base2_disp_info *disp_info; /* disp_info from baseparameter 2.0 */
+
+	u8 dsc_id;
+	u8 dsc_slice_num;
+	u8 dsc_pixel_num;
+	u64 dsc_txp_clk;
+	u64 dsc_pxl_clk;
+	u64 dsc_cds_clk;
+	struct rockchip_dsc_sink_cap dsc_sink_cap;
 
 	struct {
 		u32 *lut;
@@ -185,6 +243,9 @@ struct display_state {
 	int enable;
 	int is_init;
 	int is_enable;
+	bool force_output;
+	struct drm_display_mode force_mode;
+	u32 force_bus_format;
 };
 
 static inline struct rockchip_panel *state_get_panel(struct display_state *s)
@@ -198,8 +259,10 @@ int drm_mode_vrefresh(const struct drm_display_mode *mode);
 int display_send_mcu_cmd(struct display_state *state, u32 type, u32 val);
 bool drm_mode_is_420(const struct drm_display_info *display,
 		     struct drm_display_mode *mode);
+struct base2_disp_info *rockchip_get_disp_info(int type, int id);
 
 void drm_mode_max_resolution_filter(struct hdmi_edid_data *edid_data,
 				    struct vop_rect *max_output);
+unsigned long get_cubic_lut_buffer(int crtc_id);
 
 #endif

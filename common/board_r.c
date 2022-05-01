@@ -51,12 +51,15 @@
 #include <asm/mmu.h>
 #endif
 #include <asm/sections.h>
+#include <asm/system.h>
 #include <dm/root.h>
 #include <linux/compiler.h>
 #include <linux/err.h>
 #include <efi_loader.h>
 #include <sysmem.h>
 #include <bidram.h>
+#include <boot_rkimg.h>
+#include <mtd_blk.h>
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -112,10 +115,32 @@ static int initr_reloc(void)
  * Some of these functions are needed purely because the functions they
  * call return void. If we change them to return 0, these stubs can go away.
  */
+
+static void print_cr(void)
+{
+	u32 reg;
+
+#ifdef CONFIG_ARM64
+	reg = get_sctlr();	/* get control reg. */
+#else
+	reg = get_cr();
+#endif
+	puts("CR: ");
+	if (reg & CR_M)
+		puts("M/");
+	if (reg & CR_C)
+		puts("C/");
+	if (reg & CR_I)
+		puts("I");
+	putc('\n');
+}
+
 static int initr_caches(void)
 {
 	/* Enable caches */
 	enable_caches();
+	print_cr();
+
 	return 0;
 }
 #endif
@@ -869,9 +894,10 @@ static init_fnc_t init_sequence_r[] = {
 #if defined(CONFIG_ARM) || defined(CONFIG_NDS32) || defined(CONFIG_RISCV)
 	board_init,	/* Setup chipselects */
 #endif
-
 #if defined(CONFIG_USING_KERNEL_DTB) && !defined(CONFIG_ENV_IS_NOWHERE)
 	initr_env_switch,
+#elif defined(CONFIG_ENVF)
+	env_load,
 #endif
 
 	/*

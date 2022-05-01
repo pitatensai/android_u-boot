@@ -12,6 +12,7 @@
 #include <syscon.h>
 #include <asm/arch/clock.h>
 #include <asm/arch/cru_rk3568.h>
+#include <asm/arch/grf_rk3568.h>
 #include <asm/arch/hardware.h>
 #include <asm/io.h>
 #include <dm/lists.h>
@@ -1463,6 +1464,7 @@ static ulong rk3568_sdmmc_set_clk(struct rk3568_clk_priv *priv,
 
 	switch (rate) {
 	case OSC_HZ:
+	case 26 * MHz:
 		src_clk = CLK_SDMMC_SEL_24M;
 		break;
 	case 400 * MHz:
@@ -1529,7 +1531,7 @@ static ulong rk3568_sfc_get_clk(struct rk3568_clk_priv *priv)
 	case SCLK_SFC_SEL_125M:
 		return 125 * MHz;
 	case SCLK_SFC_SEL_150M:
-		return 150 * KHz;
+		return 150 * MHz;
 	default:
 		return -ENOENT;
 	}
@@ -1556,7 +1558,7 @@ static ulong rk3568_sfc_set_clk(struct rk3568_clk_priv *priv, ulong rate)
 	case 125 * MHz:
 		src_clk = SCLK_SFC_SEL_125M;
 		break;
-	case 150 * KHz:
+	case 150 * MHz:
 		src_clk = SCLK_SFC_SEL_150M;
 		break;
 	default:
@@ -1682,6 +1684,51 @@ static ulong rk3568_emmc_set_clk(struct rk3568_clk_priv *priv, ulong rate)
 	return rk3568_emmc_get_clk(priv);
 }
 
+static ulong rk3568_emmc_get_bclk(struct rk3568_clk_priv *priv)
+{
+	struct rk3568_cru *cru = priv->cru;
+	u32 sel, con;
+
+	con = readl(&cru->clksel_con[28]);
+	sel = (con & BCLK_EMMC_SEL_MASK) >> BCLK_EMMC_SEL_SHIFT;
+	switch (sel) {
+	case BCLK_EMMC_SEL_200M:
+		return 200 * MHz;
+	case BCLK_EMMC_SEL_150M:
+		return 150 * MHz;
+	case BCLK_EMMC_SEL_125M:
+		return 125 * MHz;
+	default:
+		return -ENOENT;
+	}
+}
+
+static ulong rk3568_emmc_set_bclk(struct rk3568_clk_priv *priv, ulong rate)
+{
+	struct rk3568_cru *cru = priv->cru;
+	int src_clk;
+
+	switch (rate) {
+	case 200 * MHz:
+		src_clk = BCLK_EMMC_SEL_200M;
+		break;
+	case 150 * MHz:
+		src_clk = BCLK_EMMC_SEL_150M;
+		break;
+	case 125 * MHz:
+		src_clk = BCLK_EMMC_SEL_125M;
+		break;
+	default:
+		return -ENOENT;
+	}
+
+	rk_clrsetreg(&cru->clksel_con[28],
+		     BCLK_EMMC_SEL_MASK,
+		     src_clk << BCLK_EMMC_SEL_SHIFT);
+
+	return rk3568_emmc_get_bclk(priv);
+}
+
 #ifndef CONFIG_SPL_BUILD
 static ulong rk3568_aclk_vop_get_clk(struct rk3568_clk_priv *priv)
 {
@@ -1706,13 +1753,19 @@ static ulong rk3568_aclk_vop_get_clk(struct rk3568_clk_priv *priv)
 static ulong rk3568_aclk_vop_set_clk(struct rk3568_clk_priv *priv, ulong rate)
 {
 	struct rk3568_cru *cru = priv->cru;
-	int src_clk_div;
+	int src_clk_div, src_clk_mux;
 
-	src_clk_div = DIV_ROUND_UP(priv->gpll_hz, rate);
+	if ((priv->cpll_hz % rate) == 0) {
+		src_clk_div = DIV_ROUND_UP(priv->cpll_hz, rate);
+		src_clk_mux = ACLK_VOP_PRE_SEL_CPLL;
+	} else {
+		src_clk_div = DIV_ROUND_UP(priv->gpll_hz, rate);
+		src_clk_mux = ACLK_VOP_PRE_SEL_GPLL;
+	}
 	assert(src_clk_div - 1 <= 31);
 	rk_clrsetreg(&cru->clksel_con[38],
 		     ACLK_VOP_PRE_SEL_MASK | ACLK_VOP_PRE_DIV_MASK,
-		     ACLK_VOP_PRE_SEL_GPLL << ACLK_VOP_PRE_SEL_SHIFT |
+		     src_clk_mux << ACLK_VOP_PRE_SEL_SHIFT |
 		     (src_clk_div - 1) << ACLK_VOP_PRE_DIV_SHIFT);
 
 	return rk3568_aclk_vop_get_clk(priv);
@@ -2148,6 +2201,303 @@ static ulong rk3568_rkvdec_set_clk(struct rk3568_clk_priv *priv,
 
 	return rk3568_rkvdec_get_clk(priv, clk_id);
 }
+
+static ulong rk3568_uart_get_rate(struct rk3568_clk_priv *priv, ulong clk_id)
+{
+	struct rk3568_cru *cru = priv->cru;
+	u32 reg, con, fracdiv, div, src, p_src, p_rate;
+	unsigned long m, n;
+
+	switch (clk_id) {
+	case SCLK_UART1:
+		reg = 52;
+		break;
+	case SCLK_UART2:
+		reg = 54;
+		break;
+	case SCLK_UART3:
+		reg = 56;
+		break;
+	case SCLK_UART4:
+		reg = 58;
+		break;
+	case SCLK_UART5:
+		reg = 60;
+		break;
+	case SCLK_UART6:
+		reg = 62;
+		break;
+	case SCLK_UART7:
+		reg = 64;
+		break;
+	case SCLK_UART8:
+		reg = 66;
+		break;
+	case SCLK_UART9:
+		reg = 68;
+		break;
+	default:
+		return -ENOENT;
+	}
+	con = readl(&cru->clksel_con[reg]);
+	src = (con & CLK_UART_SEL_MASK) >> CLK_UART_SEL_SHIFT;
+	div = (con & CLK_UART_SRC_DIV_MASK) >> CLK_UART_SRC_DIV_SHIFT;
+	p_src = (con & CLK_UART_SRC_SEL_MASK) >> CLK_UART_SRC_SEL_SHIFT;
+	if (p_src == CLK_UART_SRC_SEL_GPLL)
+		p_rate = priv->gpll_hz;
+	else if (p_src == CLK_UART_SRC_SEL_CPLL)
+		p_rate = priv->cpll_hz;
+	else
+		p_rate = 480000000;
+	if (src == CLK_UART_SEL_SRC) {
+		return DIV_TO_RATE(p_rate, div);
+	} else if (src == CLK_UART_SEL_FRAC) {
+		fracdiv = readl(&cru->clksel_con[reg + 1]);
+		n = fracdiv & CLK_UART_FRAC_NUMERATOR_MASK;
+		n >>= CLK_UART_FRAC_NUMERATOR_SHIFT;
+		m = fracdiv & CLK_UART_FRAC_DENOMINATOR_MASK;
+		m >>= CLK_UART_FRAC_DENOMINATOR_SHIFT;
+		return DIV_TO_RATE(p_rate, div) * n / m;
+	} else {
+		return OSC_HZ;
+	}
+}
+
+static ulong rk3568_uart_set_rate(struct rk3568_clk_priv *priv,
+				  ulong clk_id, ulong rate)
+{
+	struct rk3568_cru *cru = priv->cru;
+	u32 reg, clk_src, uart_src, div;
+	unsigned long m = 0, n = 0, val;
+
+	if (priv->gpll_hz % rate == 0) {
+		clk_src = CLK_UART_SRC_SEL_GPLL;
+		uart_src = CLK_UART_SEL_SRC;
+		div = DIV_ROUND_UP(priv->gpll_hz, rate);
+	} else if (priv->cpll_hz % rate == 0) {
+		clk_src = CLK_UART_SRC_SEL_CPLL;
+		uart_src = CLK_UART_SEL_SRC;
+		div = DIV_ROUND_UP(priv->gpll_hz, rate);
+	} else if (rate == OSC_HZ) {
+		clk_src = CLK_UART_SRC_SEL_GPLL;
+		uart_src = CLK_UART_SEL_XIN24M;
+		div = 2;
+	} else {
+		clk_src = CLK_UART_SRC_SEL_GPLL;
+		uart_src = CLK_UART_SEL_FRAC;
+		div = 2;
+		rational_best_approximation(rate, priv->gpll_hz / div,
+					    GENMASK(16 - 1, 0),
+					    GENMASK(16 - 1, 0),
+					    &m, &n);
+	}
+
+	switch (clk_id) {
+	case SCLK_UART1:
+		reg = 52;
+		break;
+	case SCLK_UART2:
+		reg = 54;
+		break;
+	case SCLK_UART3:
+		reg = 56;
+		break;
+	case SCLK_UART4:
+		reg = 58;
+		break;
+	case SCLK_UART5:
+		reg = 60;
+		break;
+	case SCLK_UART6:
+		reg = 62;
+		break;
+	case SCLK_UART7:
+		reg = 64;
+		break;
+	case SCLK_UART8:
+		reg = 66;
+		break;
+	case SCLK_UART9:
+		reg = 68;
+		break;
+	default:
+		return -ENOENT;
+	}
+	rk_clrsetreg(&cru->clksel_con[reg],
+		     CLK_UART_SEL_MASK | CLK_UART_SRC_SEL_MASK |
+		     CLK_UART_SRC_DIV_MASK,
+		     (clk_src << CLK_UART_SRC_SEL_SHIFT) |
+		     (uart_src << CLK_UART_SEL_SHIFT) |
+		     ((div - 1) << CLK_UART_SRC_DIV_SHIFT));
+	if (m && n) {
+		val = m << CLK_UART_FRAC_NUMERATOR_SHIFT | n;
+		writel(val, &cru->clksel_con[reg + 1]);
+	}
+
+	return rk3568_uart_get_rate(priv, clk_id);
+}
+
+static ulong rk3568_i2s3_get_rate(struct rk3568_clk_priv *priv, ulong clk_id)
+{
+	struct rk3568_cru *cru = priv->cru;
+	struct rk3568_grf *grf = priv->grf;
+	u32 con, div, src, p_rate;
+	u32 reg, fracdiv, p_src;
+	unsigned long m, n;
+
+	switch (clk_id) {
+	case I2S3_MCLKOUT_TX:
+		con = readl(&cru->clksel_con[21]);
+		src = (con & I2S3_MCLKOUT_TX_SEL_MASK) >>
+		      I2S3_MCLKOUT_TX_SEL_SHIFT;
+		if (src == I2S3_MCLKOUT_TX_SEL_12M)
+			p_rate = 12000000;
+		else
+			p_rate = rk3568_i2s3_get_rate(priv, MCLK_I2S3_2CH_TX);
+		return p_rate;
+	case I2S3_MCLKOUT_RX:
+		con = readl(&cru->clksel_con[83]);
+		src = (con & I2S3_MCLKOUT_TX_SEL_MASK) >>
+		      I2S3_MCLKOUT_TX_SEL_SHIFT;
+		if (src == I2S3_MCLKOUT_TX_SEL_12M)
+			p_rate = 12000000;
+		else
+			p_rate = rk3568_i2s3_get_rate(priv, MCLK_I2S3_2CH_RX);
+		return p_rate;
+	case I2S3_MCLKOUT:
+		con = readl(&grf->soc_con2);
+		src = (con & I2S3_MCLKOUT_SEL_MASK)
+		      >> I2S3_MCLKOUT_SEL_SHIFT;
+		if (src == I2S3_MCLKOUT_SEL_RX)
+			p_rate = rk3568_i2s3_get_rate(priv, I2S3_MCLKOUT_RX);
+		else
+			p_rate = rk3568_i2s3_get_rate(priv, I2S3_MCLKOUT_TX);
+		return p_rate;
+	case MCLK_I2S3_2CH_RX:
+		reg = 83;
+		break;
+	case MCLK_I2S3_2CH_TX:
+		reg = 21;
+		break;
+	default:
+		return -ENOENT;
+	}
+
+	con = readl(&cru->clksel_con[reg]);
+	src = (con & CLK_I2S3_SEL_MASK) >> CLK_I2S3_SEL_SHIFT;
+	div = (con & CLK_I2S3_SRC_DIV_MASK) >> CLK_I2S3_SRC_DIV_SHIFT;
+	p_src = (con & CLK_I2S3_SRC_SEL_MASK) >> CLK_I2S3_SRC_SEL_SHIFT;
+	if (p_src == CLK_I2S3_SRC_SEL_GPLL)
+		p_rate = priv->gpll_hz;
+	else if (p_src == CLK_I2S3_SRC_SEL_CPLL)
+		p_rate = priv->cpll_hz;
+	else
+		p_rate = priv->npll_hz;
+	if (src == CLK_I2S3_SEL_SRC) {
+		return DIV_TO_RATE(p_rate, div);
+	} else if (src == CLK_I2S3_SEL_FRAC) {
+		fracdiv = readl(&cru->clksel_con[reg + 1]);
+		n = fracdiv & CLK_I2S3_FRAC_NUMERATOR_MASK;
+		n >>= CLK_I2S3_FRAC_NUMERATOR_SHIFT;
+		m = fracdiv & CLK_I2S3_FRAC_DENOMINATOR_MASK;
+		m >>= CLK_I2S3_FRAC_DENOMINATOR_SHIFT;
+		return DIV_TO_RATE(p_rate, div) * n / m;
+	} else {
+		return OSC_HZ / 2;
+	}
+}
+
+static ulong rk3568_i2s3_set_rate(struct rk3568_clk_priv *priv,
+				  ulong clk_id, ulong rate)
+{
+	struct rk3568_cru *cru = priv->cru;
+	struct rk3568_grf *grf = priv->grf;
+	u32 reg, con, clk_src, i2s_src, div;
+	unsigned long m = 0, n = 0, val;
+
+	if (priv->gpll_hz % rate == 0) {
+		clk_src = CLK_I2S3_SRC_SEL_GPLL;
+		i2s_src = CLK_I2S3_SEL_SRC;
+		div = DIV_ROUND_UP(priv->gpll_hz, rate);
+	} else if (priv->cpll_hz % rate == 0) {
+		clk_src = CLK_I2S3_SRC_SEL_CPLL;
+		i2s_src = CLK_I2S3_SEL_SRC;
+		div = DIV_ROUND_UP(priv->gpll_hz, rate);
+	} else if (rate == OSC_HZ / 2) {
+		clk_src = CLK_I2S3_SRC_SEL_GPLL;
+		i2s_src = CLK_I2S3_SEL_XIN12M;
+		div = 1;
+	} else {
+		clk_src = CLK_I2S3_SRC_SEL_GPLL;
+		i2s_src = CLK_I2S3_SEL_FRAC;
+		div = 1;
+		rational_best_approximation(rate, priv->gpll_hz / div,
+					    GENMASK(16 - 1, 0),
+					    GENMASK(16 - 1, 0),
+					    &m, &n);
+	}
+
+	switch (clk_id) {
+	case I2S3_MCLKOUT_TX:
+		if (rate == 12000000) {
+			rk_clrsetreg(&cru->clksel_con[21],
+				     I2S3_MCLKOUT_TX_SEL_MASK,
+				     I2S3_MCLKOUT_TX_SEL_12M <<
+				     I2S3_MCLKOUT_TX_SEL_SHIFT);
+		} else {
+			rk3568_i2s3_set_rate(priv, MCLK_I2S3_2CH_TX, rate),
+			rk_clrsetreg(&cru->clksel_con[21],
+				     I2S3_MCLKOUT_TX_SEL_MASK,
+				     I2S3_MCLKOUT_TX_SEL_MCLK <<
+				     I2S3_MCLKOUT_TX_SEL_SHIFT);
+		}
+		return rk3568_i2s3_get_rate(priv, clk_id);
+	case I2S3_MCLKOUT_RX:
+		if (rate == 12000000) {
+			rk_clrsetreg(&cru->clksel_con[83],
+				     I2S3_MCLKOUT_TX_SEL_MASK,
+				     I2S3_MCLKOUT_TX_SEL_12M <<
+				     I2S3_MCLKOUT_TX_SEL_SHIFT);
+		} else {
+			rk3568_i2s3_set_rate(priv, MCLK_I2S3_2CH_RX, rate),
+			rk_clrsetreg(&cru->clksel_con[21],
+				     I2S3_MCLKOUT_TX_SEL_MASK,
+				     I2S3_MCLKOUT_TX_SEL_MCLK <<
+				     I2S3_MCLKOUT_TX_SEL_SHIFT);
+		}
+		return rk3568_i2s3_get_rate(priv, clk_id);
+	case I2S3_MCLKOUT:
+		con = readl(&grf->soc_con2);
+		clk_src = (con & I2S3_MCLKOUT_SEL_MASK)
+		      >> I2S3_MCLKOUT_SEL_SHIFT;
+		if (clk_src == I2S3_MCLKOUT_SEL_RX)
+			rk3568_i2s3_set_rate(priv, I2S3_MCLKOUT_RX, rate);
+		else
+			rk3568_i2s3_set_rate(priv, I2S3_MCLKOUT_TX, rate);
+		return rk3568_i2s3_get_rate(priv, clk_id);
+	case MCLK_I2S3_2CH_RX:
+		reg = 83;
+		break;
+	case MCLK_I2S3_2CH_TX:
+		reg = 21;
+		break;
+	default:
+		return -ENOENT;
+	}
+
+	rk_clrsetreg(&cru->clksel_con[reg],
+		     CLK_I2S3_SEL_MASK | CLK_I2S3_SRC_SEL_MASK |
+		     CLK_I2S3_SRC_DIV_MASK,
+		     (clk_src << CLK_I2S3_SRC_SEL_SHIFT) |
+		     (i2s_src << CLK_I2S3_SEL_SHIFT) |
+		     ((div - 1) << CLK_I2S3_SRC_DIV_SHIFT));
+	if (m && n) {
+		val = m << CLK_I2S3_FRAC_NUMERATOR_SHIFT | n;
+		writel(val, &cru->clksel_con[reg + 1]);
+	}
+	return rk3568_i2s3_get_rate(priv, clk_id);
+}
+
 #endif
 
 static ulong rk3568_clk_get_rate(struct clk *clk)
@@ -2239,6 +2589,12 @@ static ulong rk3568_clk_get_rate(struct clk *clk)
 	case CCLK_EMMC:
 		rate = rk3568_emmc_get_clk(priv);
 		break;
+	case BCLK_EMMC:
+		rate = rk3568_emmc_get_bclk(priv);
+		break;
+	case TCLK_EMMC:
+		rate = OSC_HZ;
+		break;
 #ifndef CONFIG_SPL_BUILD
 	case ACLK_VOP:
 		rate = rk3568_aclk_vop_get_clk(priv);
@@ -2280,6 +2636,24 @@ static ulong rk3568_clk_get_rate(struct clk *clk)
 		break;
 	case TCLK_WDT_NS:
 		rate = OSC_HZ;
+		break;
+	case SCLK_UART1:
+	case SCLK_UART2:
+	case SCLK_UART3:
+	case SCLK_UART4:
+	case SCLK_UART5:
+	case SCLK_UART6:
+	case SCLK_UART7:
+	case SCLK_UART8:
+	case SCLK_UART9:
+		rate = rk3568_uart_get_rate(priv, clk->id);
+		break;
+	case I2S3_MCLKOUT_RX:
+	case I2S3_MCLKOUT_TX:
+	case MCLK_I2S3_2CH_RX:
+	case MCLK_I2S3_2CH_TX:
+	case I2S3_MCLKOUT:
+		rate = rk3568_i2s3_get_rate(priv, clk->id);
 		break;
 #endif
 	case ACLK_SECURE_FLASH:
@@ -2401,6 +2775,12 @@ static ulong rk3568_clk_set_rate(struct clk *clk, ulong rate)
 	case CCLK_EMMC:
 		ret = rk3568_emmc_set_clk(priv, rate);
 		break;
+	case BCLK_EMMC:
+		ret = rk3568_emmc_set_bclk(priv, rate);
+		break;
+	case TCLK_EMMC:
+		ret = OSC_HZ;
+		break;
 #ifndef CONFIG_SPL_BUILD
 	case ACLK_VOP:
 		ret = rk3568_aclk_vop_set_clk(priv, rate);
@@ -2448,6 +2828,24 @@ static ulong rk3568_clk_set_rate(struct clk *clk, ulong rate)
 		break;
 	case TCLK_WDT_NS:
 		ret = OSC_HZ;
+		break;
+	case SCLK_UART1:
+	case SCLK_UART2:
+	case SCLK_UART3:
+	case SCLK_UART4:
+	case SCLK_UART5:
+	case SCLK_UART6:
+	case SCLK_UART7:
+	case SCLK_UART8:
+	case SCLK_UART9:
+		ret = rk3568_uart_set_rate(priv, clk->id, rate);
+		break;
+	case I2S3_MCLKOUT_RX:
+	case I2S3_MCLKOUT_TX:
+	case MCLK_I2S3_2CH_RX:
+	case MCLK_I2S3_2CH_TX:
+	case I2S3_MCLKOUT:
+		ret = rk3568_i2s3_set_rate(priv, clk->id, rate);
 		break;
 #endif
 	case ACLK_SECURE_FLASH:
@@ -2749,6 +3147,42 @@ static int __maybe_unused rk3568_rkvdec_set_parent(struct clk *clk,
 	return 0;
 }
 
+static int __maybe_unused rk3568_i2s3_set_parent(struct clk *clk,
+						 struct clk *parent)
+{
+	struct rk3568_clk_priv *priv = dev_get_priv(clk->dev);
+	struct rk3568_grf *grf = priv->grf;
+
+	switch (clk->id) {
+	case I2S3_MCLK_IOE:
+		if (parent->id == I2S3_MCLKOUT) {
+			rk_clrsetreg(&grf->soc_con2, I2S3_MCLK_IOE_SEL_MASK,
+				     I2S3_MCLK_IOE_SEL_CLKOUT <<
+				     I2S3_MCLK_IOE_SEL_SHIFT);
+		} else {
+			rk_clrsetreg(&grf->soc_con2, I2S3_MCLK_IOE_SEL_MASK,
+				     I2S3_MCLK_IOE_SEL_CLKIN <<
+				     I2S3_MCLK_IOE_SEL_SHIFT);
+		}
+		break;
+	case I2S3_MCLKOUT:
+		if (parent->id == I2S3_MCLKOUT_RX) {
+			rk_clrsetreg(&grf->soc_con2, I2S3_MCLKOUT_SEL_MASK,
+				     I2S3_MCLKOUT_SEL_RX <<
+				     I2S3_MCLKOUT_SEL_SHIFT);
+		} else {
+			rk_clrsetreg(&grf->soc_con2, I2S3_MCLKOUT_SEL_MASK,
+				     I2S3_MCLKOUT_SEL_TX <<
+				     I2S3_MCLKOUT_SEL_SHIFT);
+		}
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int rk3568_clk_set_parent(struct clk *clk, struct clk *parent)
 {
 	switch (clk->id) {
@@ -2767,6 +3201,9 @@ static int rk3568_clk_set_parent(struct clk *clk, struct clk *parent)
 	case ACLK_RKVDEC_PRE:
 	case CLK_RKVDEC_CORE:
 		return rk3568_rkvdec_set_parent(clk, parent);
+	case I2S3_MCLK_IOE:
+	case I2S3_MCLKOUT:
+		return rk3568_i2s3_set_parent(clk, parent);
 	default:
 		return -ENOENT;
 	}

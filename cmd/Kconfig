@@ -1103,6 +1103,12 @@ config CMD_TFTP_FLASH
 	help
 	  TFTP flash command, download and flash the Image to partition.
 
+config CMD_TFTP_UPDATE
+	bool "tftp update"
+	help
+	  Update a set of images organized with FIT via network using TFTP protocol
+
+
 config CMD_TFTPSRV
 	bool "tftpsrv"
 	help
@@ -1636,6 +1642,12 @@ config CMD_ZFS
 endmenu
 
 menu "Debug commands"
+
+config CMD_ATAGS
+	bool "atags - Dump all rockchip atags"
+	default y
+	help
+	  This command dump all rockchip atags.
 
 config CMD_BEDBUG
 	bool "bedbug"

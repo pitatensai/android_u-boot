@@ -6,7 +6,7 @@
 #
 
 # Process args and auto set variables
-source ./${srctree}/arch/arm/mach-rockchip/make_fit_args.sh
+source ./${srctree}/arch/arm/mach-rockchip/fit_args.sh
 
 if [ ! -f ${srctree}/images/ramdisk ]; then
 	touch ${srctree}/images/ramdisk
@@ -21,6 +21,10 @@ elif [ "${COMPRESSION}" == "lz4" ]; then
 else
 	COMPRESSION="none"
 	SUFFIX=
+fi
+
+if grep  -q '^CONFIG_FIT_ENABLE_RSASSA_PSS_SUPPORT=y' .config ; then
+	ALGO_PADDING="				padding = \"pss\";"
 fi
 
 cat << EOF
@@ -96,7 +100,7 @@ cat << EOF
 			multi = "resource";
 			signature {
 				algo = "sha256,rsa2048";
-				padding = "pss";
+				${ALGO_PADDING}
 				key-name-hint = "dev";
 				sign-images = "fdt", "kernel", "ramdisk", "multi";
 			};

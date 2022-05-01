@@ -10,6 +10,7 @@
 #include <dm.h>
 #include <clk.h>
 #include <phy.h>
+#include <reset.h>
 #include <syscon.h>
 #include <asm/io.h>
 #include <asm/arch/periph.h>
@@ -17,6 +18,7 @@
 #include <asm/arch/hardware.h>
 #ifdef CONFIG_DWC_ETH_QOS
 #include <asm/arch/grf_rk3568.h>
+#include <asm/arch/grf_rk3588.h>
 #include <asm/arch/grf_rv1126.h>
 #include "dwc_eth_qos.h"
 #else
@@ -33,6 +35,7 @@
 #include <dt-bindings/clock/rk3288-cru.h>
 #endif
 #include <dm/pinctrl.h>
+#include <dm/of_access.h>
 
 DECLARE_GLOBAL_DATA_PTR;
 
@@ -42,6 +45,7 @@ struct rockchip_eth_dev {
 #else
 	struct dw_eth_dev dw;
 #endif
+	int phy_interface;
 };
 
 /*
@@ -55,7 +59,10 @@ struct gmac_rockchip_platdata {
 #else
 	struct eth_pdata eth_pdata;
 #endif
+	struct reset_ctl phy_reset;
+	bool integrated_phy;
 	bool clock_input;
+	int phy_interface;
 	int tx_delay;
 	int rx_delay;
 	int bus_id;
@@ -65,9 +72,12 @@ struct rk_gmac_ops {
 #ifdef CONFIG_DWC_ETH_QOS
 	const struct eqos_config config;
 #endif
-	int (*fix_mac_speed)(struct rockchip_eth_dev *dev);
+	int (*fix_mac_speed)(struct gmac_rockchip_platdata *pdata,
+			     struct rockchip_eth_dev *dev);
 	void (*set_to_rmii)(struct gmac_rockchip_platdata *pdata);
 	void (*set_to_rgmii)(struct gmac_rockchip_platdata *pdata);
+	void (*set_clock_selection)(struct gmac_rockchip_platdata *pdata);
+	void (*integrated_phy_powerup)(struct gmac_rockchip_platdata *pdata);
 };
 
 #ifdef CONFIG_DWC_ETH_QOS
@@ -96,13 +106,34 @@ void gmac_set_rgmii(struct udevice *dev, u32 tx_delay, u32 rx_delay)
 static int gmac_rockchip_ofdata_to_platdata(struct udevice *dev)
 {
 	struct gmac_rockchip_platdata *pdata = dev_get_platdata(dev);
+	struct ofnode_phandle_args args;
 	const char *string;
+	int ret;
 
 	string = dev_read_string(dev, "clock_in_out");
 	if (!strcmp(string, "input"))
 		pdata->clock_input = true;
 	else
 		pdata->clock_input = false;
+
+	/* If phy-handle property is passed from DT, use it as the PHY */
+	ret = dev_read_phandle_with_args(dev, "phy-handle", NULL, 0, 0, &args);
+	if (ret) {
+		debug("Cannot get phy phandle: ret=%d\n", ret);
+		pdata->integrated_phy = dev_read_bool(dev, "phy-is-integrated");
+	} else {
+		debug("Found phy-handle subnode\n");
+		pdata->integrated_phy = ofnode_read_bool(args.node,
+							 "phy-is-integrated");
+	}
+
+	if (pdata->integrated_phy) {
+		ret = reset_get_by_name(dev, "mac-phy", &pdata->phy_reset);
+		if (ret) {
+			debug("No PHY reset control found: ret=%d\n", ret);
+			return ret;
+		}
+	}
 
 	/* Check the new naming-style first... */
 	pdata->tx_delay = dev_read_u32_default(dev, "tx_delay", -ENOENT);
@@ -122,7 +153,8 @@ static int gmac_rockchip_ofdata_to_platdata(struct udevice *dev)
 }
 
 #ifndef CONFIG_DWC_ETH_QOS
-static int px30_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
+static int px30_gmac_fix_mac_speed(struct gmac_rockchip_platdata *pdata,
+				   struct rockchip_eth_dev *dev)
 {
 	struct dw_eth_dev *priv = &dev->dw;
 	struct px30_grf *grf;
@@ -164,7 +196,8 @@ static int px30_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
 	return 0;
 }
 
-static int rk1808_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
+static int rk1808_gmac_fix_mac_speed(struct gmac_rockchip_platdata *pdata,
+				     struct rockchip_eth_dev *dev)
 {
 	struct dw_eth_dev *priv = &dev->dw;
 	struct clk clk_speed;
@@ -199,7 +232,8 @@ static int rk1808_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
 	return 0;
 }
 
-static int rk3228_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
+static int rk3228_gmac_fix_mac_speed(struct gmac_rockchip_platdata *pdata,
+				     struct rockchip_eth_dev *dev)
 {
 	struct dw_eth_dev *priv = &dev->dw;
 	struct rk322x_grf *grf;
@@ -210,14 +244,26 @@ static int rk3228_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
 		RK3228_GMAC_CLK_SEL_125M  = 0 << 8,
 		RK3228_GMAC_CLK_SEL_25M   = 3 << 8,
 		RK3228_GMAC_CLK_SEL_2_5M  = 2 << 8,
+
+		RK3228_GMAC_RMII_CLK_MASK   = BIT(7),
+		RK3228_GMAC_RMII_CLK_2_5M   = 0,
+		RK3228_GMAC_RMII_CLK_25M    = BIT(7),
+
+		RK3228_GMAC_RMII_SPEED_MASK = BIT(2),
+		RK3228_GMAC_RMII_SPEED_10   = 0,
+		RK3228_GMAC_RMII_SPEED_100  = BIT(2),
 	};
 
 	switch (priv->phydev->speed) {
 	case 10:
-		clk = RK3228_GMAC_CLK_SEL_2_5M;
+		clk = (pdata->phy_interface == PHY_INTERFACE_MODE_RMII) ?
+		       (RK3228_GMAC_RMII_CLK_2_5M | RK3228_GMAC_RMII_SPEED_10) :
+		       RK3228_GMAC_CLK_SEL_2_5M;
 		break;
 	case 100:
-		clk = RK3228_GMAC_CLK_SEL_25M;
+		clk = (pdata->phy_interface == PHY_INTERFACE_MODE_RMII) ?
+		       (RK3228_GMAC_RMII_CLK_25M | RK3228_GMAC_RMII_SPEED_100) :
+		       RK3228_GMAC_CLK_SEL_25M;
 		break;
 	case 1000:
 		clk = RK3228_GMAC_CLK_SEL_125M;
@@ -228,12 +274,17 @@ static int rk3228_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
 	}
 
 	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
-	rk_clrsetreg(&grf->mac_con[1], RK3228_GMAC_CLK_SEL_MASK, clk);
+	rk_clrsetreg(&grf->mac_con[1],
+		     RK3228_GMAC_CLK_SEL_MASK |
+		     RK3228_GMAC_RMII_CLK_MASK |
+		     RK3228_GMAC_RMII_SPEED_MASK,
+		     clk);
 
 	return 0;
 }
 
-static int rk3288_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
+static int rk3288_gmac_fix_mac_speed(struct gmac_rockchip_platdata *pdata,
+				     struct rockchip_eth_dev *dev)
 {
 	struct dw_eth_dev *priv = &dev->dw;
 	struct rk3288_grf *grf;
@@ -260,7 +311,8 @@ static int rk3288_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
 	return 0;
 }
 
-static int rk3308_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
+static int rk3308_gmac_fix_mac_speed(struct gmac_rockchip_platdata *pdata,
+				     struct rockchip_eth_dev *dev)
 {
 	struct dw_eth_dev *priv = &dev->dw;
 	struct rk3308_grf *grf;
@@ -302,7 +354,8 @@ static int rk3308_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
 	return 0;
 }
 
-static int rk3328_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
+static int rk3328_gmac_fix_mac_speed(struct gmac_rockchip_platdata *pdata,
+				     struct rockchip_eth_dev *dev)
 {
 	struct dw_eth_dev *priv = &dev->dw;
 	struct rk3328_grf_regs *grf;
@@ -313,14 +366,26 @@ static int rk3328_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
 		RK3328_GMAC_CLK_SEL_125M  = 0 << 11,
 		RK3328_GMAC_CLK_SEL_25M   = 3 << 11,
 		RK3328_GMAC_CLK_SEL_2_5M  = 2 << 11,
+
+		RK3328_GMAC_RMII_CLK_MASK   = BIT(7),
+		RK3328_GMAC_RMII_CLK_2_5M   = 0,
+		RK3328_GMAC_RMII_CLK_25M    = BIT(7),
+
+		RK3328_GMAC_RMII_SPEED_MASK = BIT(2),
+		RK3328_GMAC_RMII_SPEED_10   = 0,
+		RK3328_GMAC_RMII_SPEED_100  = BIT(2),
 	};
 
 	switch (priv->phydev->speed) {
 	case 10:
-		clk = RK3328_GMAC_CLK_SEL_2_5M;
+		clk = (pdata->phy_interface == PHY_INTERFACE_MODE_RMII) ?
+		       (RK3328_GMAC_RMII_CLK_2_5M | RK3328_GMAC_RMII_SPEED_10) :
+		       RK3328_GMAC_CLK_SEL_2_5M;
 		break;
 	case 100:
-		clk = RK3328_GMAC_CLK_SEL_25M;
+		clk = (pdata->phy_interface == PHY_INTERFACE_MODE_RMII) ?
+		       (RK3328_GMAC_RMII_CLK_25M | RK3328_GMAC_RMII_SPEED_100) :
+		       RK3328_GMAC_CLK_SEL_25M;
 		break;
 	case 1000:
 		clk = RK3328_GMAC_CLK_SEL_125M;
@@ -331,12 +396,17 @@ static int rk3328_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
 	}
 
 	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
-	rk_clrsetreg(&grf->mac_con[1], RK3328_GMAC_CLK_SEL_MASK, clk);
+	rk_clrsetreg(pdata->integrated_phy ? &grf->mac_con[2] : &grf->mac_con[1],
+		     RK3328_GMAC_CLK_SEL_MASK |
+		     RK3328_GMAC_RMII_CLK_MASK |
+		     RK3328_GMAC_RMII_SPEED_MASK,
+		     clk);
 
 	return 0;
 }
 
-static int rk3368_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
+static int rk3368_gmac_fix_mac_speed(struct gmac_rockchip_platdata *pdata,
+				     struct rockchip_eth_dev *dev)
 {
 	struct dw_eth_dev *priv = &dev->dw;
 	struct rk3368_grf *grf;
@@ -369,7 +439,8 @@ static int rk3368_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
 	return 0;
 }
 
-static int rk3399_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
+static int rk3399_gmac_fix_mac_speed(struct gmac_rockchip_platdata *pdata,
+				     struct rockchip_eth_dev *dev)
 {
 	struct dw_eth_dev *priv = &dev->dw;
 	struct rk3399_grf_regs *grf;
@@ -396,7 +467,8 @@ static int rk3399_gmac_fix_mac_speed(struct rockchip_eth_dev *dev)
 	return 0;
 }
 
-static int rv1108_set_rmii_speed(struct rockchip_eth_dev *dev)
+static int rv1108_set_rmii_speed(struct gmac_rockchip_platdata *pdata,
+				 struct rockchip_eth_dev *dev)
 {
 	struct dw_eth_dev *priv = &dev->dw;
 	struct rv1108_grf *grf;
@@ -432,7 +504,61 @@ static int rv1108_set_rmii_speed(struct rockchip_eth_dev *dev)
 	return 0;
 }
 #else
-static int rv1126_set_rgmii_speed(struct rockchip_eth_dev *dev)
+static int rk3588_set_rgmii_speed(struct gmac_rockchip_platdata *pdata,
+				  struct rockchip_eth_dev *dev)
+{
+	struct eqos_priv *priv = &dev->eqos;
+	struct rk3588_php_grf *php_grf;
+	unsigned int div, div_mask;
+
+	enum {
+		RK3588_GMAC_CLK_RGMII_DIV_SHIFT = 2,
+		RK3588_GMAC_CLK_RGMII_DIV_MASK = GENMASK(3, 2),
+		RK3588_GMAC_CLK_RGMII_DIV1 = 0,
+		RK3588_GMAC_CLK_RGMII_DIV5 = GENMASK(3, 2),
+		RK3588_GMAC_CLK_RGMII_DIV50 = BIT(3),
+		RK3588_GMA_CLK_RMII_DIV2 = BIT(2),
+		RK3588_GMAC_CLK_RMII_DIV20 = 0,
+	};
+
+	php_grf = syscon_get_first_range(ROCKCHIP_SYSCON_PHP_GRF);
+
+	switch (priv->phy->speed) {
+	case 10:
+		if (pdata->phy_interface == PHY_INTERFACE_MODE_RMII)
+			div = RK3588_GMAC_CLK_RMII_DIV20;
+		else
+			div = RK3588_GMAC_CLK_RGMII_DIV50;
+		break;
+	case 100:
+		if (pdata->phy_interface == PHY_INTERFACE_MODE_RMII)
+			div = RK3588_GMA_CLK_RMII_DIV2;
+		else
+			div = RK3588_GMAC_CLK_RGMII_DIV5;
+		break;
+	case 1000:
+		if (pdata->phy_interface != PHY_INTERFACE_MODE_RMII)
+			div = RK3588_GMAC_CLK_RGMII_DIV1;
+		else
+			return -EINVAL;
+		break;
+	default:
+		debug("Unknown phy speed: %d\n", priv->phy->speed);
+		return -EINVAL;
+	}
+
+	if (pdata->bus_id == 1) {
+		div <<= 5;
+		div_mask = RK3588_GMAC_CLK_RGMII_DIV_MASK << 5;
+	}
+
+	rk_clrsetreg(&php_grf->clk_con1, div_mask, div);
+
+	return 0;
+}
+
+static int rv1126_set_rgmii_speed(struct gmac_rockchip_platdata *pdata,
+				  struct rockchip_eth_dev *dev)
 {
 	struct eqos_priv *priv = &dev->eqos;
 	struct clk clk_speed;
@@ -572,6 +698,28 @@ static void rk3228_gmac_set_to_rgmii(struct gmac_rockchip_platdata *pdata)
 		     pdata->tx_delay << RK3228_CLK_TX_DL_CFG_GMAC_SHIFT);
 }
 
+static void rk3228_gmac_set_to_rmii(struct gmac_rockchip_platdata *pdata)
+{
+	struct rk322x_grf *grf;
+	enum {
+		RK3228_GRF_CON_RMII_MODE_MASK = BIT(11),
+		RK3228_GRF_CON_RMII_MODE_SEL = BIT(11),
+		RK3228_RMII_MODE_MASK = BIT(10),
+		RK3228_RMII_MODE_SEL = BIT(10),
+		RK3228_GMAC_PHY_INTF_SEL_MASK  = GENMASK(6, 4),
+		RK3228_GMAC_PHY_INTF_SEL_RMII = BIT(6),
+	};
+
+	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
+	rk_clrsetreg(&grf->mac_con[1],
+		     RK3228_GRF_CON_RMII_MODE_MASK |
+		     RK3228_RMII_MODE_MASK |
+		     RK3228_GMAC_PHY_INTF_SEL_MASK,
+		     RK3228_GRF_CON_RMII_MODE_SEL |
+		     RK3228_RMII_MODE_SEL |
+		     RK3228_GMAC_PHY_INTF_SEL_RMII);
+}
+
 static void rk3288_gmac_set_to_rgmii(struct gmac_rockchip_platdata *pdata)
 {
 	struct rk3288_grf *grf;
@@ -652,6 +800,25 @@ static void rk3328_gmac_set_to_rgmii(struct gmac_rockchip_platdata *pdata)
 		     pdata->tx_delay << RK3328_CLK_TX_DL_CFG_GMAC_SHIFT);
 }
 
+static void rk3328_gmac_set_to_rmii(struct gmac_rockchip_platdata *pdata)
+{
+	struct rk3328_grf_regs *grf;
+	enum {
+		RK3328_RMII_MODE_MASK  = BIT(9),
+		RK3328_RMII_MODE = BIT(9),
+
+		RK3328_GMAC_PHY_INTF_SEL_MASK  = GENMASK(6, 4),
+		RK3328_GMAC_PHY_INTF_SEL_RMII = BIT(6),
+	};
+
+	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
+	rk_clrsetreg(pdata->integrated_phy ? &grf->mac_con[2] : &grf->mac_con[1],
+		     RK3328_RMII_MODE_MASK |
+		     RK3328_GMAC_PHY_INTF_SEL_MASK,
+		     RK3328_GMAC_PHY_INTF_SEL_RMII |
+		     RK3328_RMII_MODE);
+}
+
 static void rk3368_gmac_set_to_rgmii(struct gmac_rockchip_platdata *pdata)
 {
 	struct rk3368_grf *grf;
@@ -725,6 +892,127 @@ static void rv1108_gmac_set_to_rmii(struct gmac_rockchip_platdata *pdata)
 		     RV1108_GMAC_PHY_INTF_SEL_MASK,
 		     RV1108_GMAC_PHY_INTF_SEL_RMII);
 }
+
+static void rk3228_gmac_integrated_phy_powerup(struct gmac_rockchip_platdata *pdata)
+{
+	struct rk322x_grf *grf;
+	enum {
+		RK3228_GRF_CON_MUX_GMAC_INTEGRATED_PHY_MASK = BIT(15),
+		RK3228_GRF_CON_MUX_GMAC_INTEGRATED_PHY = BIT(15),
+	};
+	enum {
+		RK3228_MACPHY_CFG_CLK_50M_MASK = BIT(14),
+		RK3228_MACPHY_CFG_CLK_50M = BIT(14),
+
+		RK3228_MACPHY_RMII_MODE_MASK = GENMASK(7, 6),
+		RK3228_MACPHY_RMII_MODE = BIT(6),
+
+		RK3228_MACPHY_ENABLE_MASK = BIT(0),
+		RK3228_MACPHY_DISENABLE = 0,
+		RK3228_MACPHY_ENABLE = BIT(0),
+	};
+	enum {
+		RK3228_RK_GRF_CON2_MACPHY_ID_MASK = GENMASK(6, 0),
+		RK3228_RK_GRF_CON2_MACPHY_ID = 0x1234,
+	};
+	enum {
+		RK3228_RK_GRF_CON3_MACPHY_ID_MASK = GENMASK(5, 0),
+		RK3228_RK_GRF_CON3_MACPHY_ID = 0x35,
+	};
+
+	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
+	rk_clrsetreg(&grf->con_iomux,
+		     RK3228_GRF_CON_MUX_GMAC_INTEGRATED_PHY_MASK,
+		     RK3228_GRF_CON_MUX_GMAC_INTEGRATED_PHY);
+
+	rk_clrsetreg(&grf->macphy_con[2],
+		     RK3228_RK_GRF_CON2_MACPHY_ID_MASK,
+		     RK3228_RK_GRF_CON2_MACPHY_ID);
+
+	rk_clrsetreg(&grf->macphy_con[3],
+		     RK3228_RK_GRF_CON3_MACPHY_ID_MASK,
+		     RK3228_RK_GRF_CON3_MACPHY_ID);
+
+	/* disabled before trying to reset it &*/
+	rk_clrsetreg(&grf->macphy_con[0],
+		     RK3228_MACPHY_CFG_CLK_50M_MASK |
+		     RK3228_MACPHY_RMII_MODE_MASK |
+		     RK3228_MACPHY_ENABLE_MASK,
+		     RK3228_MACPHY_CFG_CLK_50M |
+		     RK3228_MACPHY_RMII_MODE |
+		     RK3228_MACPHY_DISENABLE);
+
+	reset_assert(&pdata->phy_reset);
+	udelay(10);
+	reset_deassert(&pdata->phy_reset);
+	udelay(10);
+
+	rk_clrsetreg(&grf->macphy_con[0],
+		     RK3228_MACPHY_ENABLE_MASK,
+		     RK3228_MACPHY_ENABLE);
+	udelay(30 * 1000);
+}
+
+static void rk3328_gmac_integrated_phy_powerup(struct gmac_rockchip_platdata *pdata)
+{
+	struct rk3328_grf_regs *grf;
+	enum {
+		RK3328_GRF_CON_RMII_MODE_MASK = BIT(9),
+		RK3328_GRF_CON_RMII_MODE = BIT(9),
+	};
+	enum {
+		RK3328_MACPHY_CFG_CLK_50M_MASK = BIT(14),
+		RK3328_MACPHY_CFG_CLK_50M = BIT(14),
+
+		RK3328_MACPHY_RMII_MODE_MASK = GENMASK(7, 6),
+		RK3328_MACPHY_RMII_MODE = BIT(6),
+
+		RK3328_MACPHY_ENABLE_MASK = BIT(0),
+		RK3328_MACPHY_DISENABLE = 0,
+		RK3328_MACPHY_ENABLE = BIT(0),
+	};
+	enum {
+		RK3328_RK_GRF_CON2_MACPHY_ID_MASK = GENMASK(6, 0),
+		RK3328_RK_GRF_CON2_MACPHY_ID = 0x1234,
+	};
+	enum {
+		RK3328_RK_GRF_CON3_MACPHY_ID_MASK = GENMASK(5, 0),
+		RK3328_RK_GRF_CON3_MACPHY_ID = 0x35,
+	};
+
+	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
+	rk_clrsetreg(&grf->macphy_con[1],
+		     RK3328_GRF_CON_RMII_MODE_MASK,
+		     RK3328_GRF_CON_RMII_MODE);
+
+	rk_clrsetreg(&grf->macphy_con[2],
+		     RK3328_RK_GRF_CON2_MACPHY_ID_MASK,
+		     RK3328_RK_GRF_CON2_MACPHY_ID);
+
+	rk_clrsetreg(&grf->macphy_con[3],
+		     RK3328_RK_GRF_CON3_MACPHY_ID_MASK,
+		     RK3328_RK_GRF_CON3_MACPHY_ID);
+
+	/* disabled before trying to reset it &*/
+	rk_clrsetreg(&grf->macphy_con[0],
+		     RK3328_MACPHY_CFG_CLK_50M_MASK |
+		     RK3328_MACPHY_RMII_MODE_MASK |
+		     RK3328_MACPHY_ENABLE_MASK,
+		     RK3328_MACPHY_CFG_CLK_50M |
+		     RK3328_MACPHY_RMII_MODE |
+		     RK3328_MACPHY_DISENABLE);
+
+	reset_assert(&pdata->phy_reset);
+	udelay(10);
+	reset_deassert(&pdata->phy_reset);
+	udelay(10);
+
+	rk_clrsetreg(&grf->macphy_con[0],
+		     RK3328_MACPHY_ENABLE_MASK,
+		     RK3328_MACPHY_ENABLE);
+	udelay(30 * 1000);
+}
+
 #else
 static void rk3568_set_to_rmii(struct gmac_rockchip_platdata *pdata)
 {
@@ -799,6 +1087,125 @@ static void rk3568_set_to_rgmii(struct gmac_rockchip_platdata *pdata)
 		     RK3568_TXCLK_DLY_ENA_GMAC_ENABLE |
 		     RK3568_RXCLK_DLY_ENA_GMAC_ENABLE |
 		     RK3568_GMAC_PHY_INTF_SEL_RGMII);
+}
+
+static void rk3588_set_to_rmii(struct gmac_rockchip_platdata *pdata)
+{
+	unsigned int intf_sel, intf_sel_mask;
+	unsigned int clk_mode, clk_mode_mask;
+	struct rk3588_php_grf *php_grf;
+
+	enum {
+		RK3588_GMAC_PHY_INTF_SEL_SHIFT = 3,
+		RK3588_GMAC_PHY_INTF_SEL_MASK = GENMASK(5, 3),
+		RK3588_GMAC_PHY_INTF_SEL_RMII = BIT(5),
+	};
+
+	enum {
+		RK3588_GMAC_CLK_RMII_MODE_SHIFT = 0x0,
+		RK3588_GMAC_CLK_RMII_MODE_MASK = BIT(0),
+		RK3588_GMAC_CLK_RMII_MODE = 0x1,
+	};
+
+	php_grf = syscon_get_first_range(ROCKCHIP_SYSCON_PHP_GRF);
+
+	if (pdata->bus_id == 1) {
+		intf_sel = RK3588_GMAC_PHY_INTF_SEL_RMII << 6;
+		intf_sel_mask = RK3588_GMAC_PHY_INTF_SEL_MASK << 6;
+		clk_mode = RK3588_GMAC_CLK_RMII_MODE << 5;
+		clk_mode_mask = RK3588_GMAC_CLK_RMII_MODE_MASK << 5;
+	} else {
+		intf_sel = RK3588_GMAC_PHY_INTF_SEL_RMII;
+		intf_sel_mask = RK3588_GMAC_PHY_INTF_SEL_MASK;
+		clk_mode = RK3588_GMAC_CLK_RMII_MODE;
+		clk_mode_mask = RK3588_GMAC_CLK_RMII_MODE_MASK;
+	}
+
+	rk_clrsetreg(&php_grf->gmac_con0, intf_sel_mask, intf_sel);
+	rk_clrsetreg(&php_grf->clk_con1, clk_mode_mask, clk_mode);
+}
+
+static void rk3588_set_to_rgmii(struct gmac_rockchip_platdata *pdata)
+{
+	unsigned int rx_enable, rx_enable_mask, tx_enable, tx_enable_mask;
+	unsigned int intf_sel, intf_sel_mask;
+	unsigned int clk_mode, clk_mode_mask;
+	unsigned int rx_delay;
+	struct rk3588_php_grf *php_grf;
+	struct rk3588_sys_grf *grf;
+	void *offset_con;
+
+	enum {
+		RK3588_GMAC_PHY_INTF_SEL_SHIFT = 3,
+		RK3588_GMAC_PHY_INTF_SEL_MASK = GENMASK(5, 3),
+		RK3588_GMAC_PHY_INTF_SEL_RGMII = BIT(3),
+
+		RK3588_RXCLK_DLY_ENA_GMAC_MASK = BIT(3),
+		RK3588_RXCLK_DLY_ENA_GMAC_DISABLE = 0,
+		RK3588_RXCLK_DLY_ENA_GMAC_ENABLE = BIT(3),
+
+		RK3588_TXCLK_DLY_ENA_GMAC_MASK = BIT(2),
+		RK3588_TXCLK_DLY_ENA_GMAC_DISABLE = 0,
+		RK3588_TXCLK_DLY_ENA_GMAC_ENABLE = BIT(2),
+	};
+
+	enum {
+		RK3588_CLK_RX_DL_CFG_GMAC_SHIFT = 0x8,
+		RK3588_CLK_RX_DL_CFG_GMAC_MASK = GENMASK(15, 8),
+
+		RK3588_CLK_TX_DL_CFG_GMAC_SHIFT = 0x0,
+		RK3588_CLK_TX_DL_CFG_GMAC_MASK = GENMASK(7, 0),
+	};
+
+	enum {
+		RK3588_GMAC_CLK_RGMII_MODE_SHIFT = 0x0,
+		RK3588_GMAC_CLK_RGMII_MODE_MASK = BIT(0),
+		RK3588_GMAC_CLK_RGMII_MODE = 0x0,
+	};
+
+	grf = syscon_get_first_range(ROCKCHIP_SYSCON_GRF);
+	php_grf = syscon_get_first_range(ROCKCHIP_SYSCON_PHP_GRF);
+
+	if (pdata->rx_delay < 0) {
+		rx_enable = RK3588_RXCLK_DLY_ENA_GMAC_DISABLE;
+		rx_delay = 0;
+	} else {
+		rx_enable = RK3588_RXCLK_DLY_ENA_GMAC_ENABLE;
+		rx_delay = pdata->rx_delay << RK3588_CLK_RX_DL_CFG_GMAC_SHIFT;
+	}
+
+	if (pdata->bus_id == 1) {
+		offset_con = &grf->soc_con9;
+		rx_enable = rx_delay << 2;
+		rx_enable_mask = RK3588_RXCLK_DLY_ENA_GMAC_MASK << 2;
+		tx_enable = RK3588_TXCLK_DLY_ENA_GMAC_ENABLE << 2;
+		tx_enable_mask = RK3588_TXCLK_DLY_ENA_GMAC_MASK << 2;
+		intf_sel = RK3588_GMAC_PHY_INTF_SEL_RGMII << 6;
+		intf_sel_mask = RK3588_GMAC_PHY_INTF_SEL_MASK << 6;
+		clk_mode = RK3588_GMAC_CLK_RGMII_MODE << 5;
+		clk_mode_mask = RK3588_GMAC_CLK_RGMII_MODE_MASK << 5;
+	} else {
+		offset_con = &grf->soc_con8;
+		rx_enable_mask = RK3588_RXCLK_DLY_ENA_GMAC_MASK;
+		tx_enable = RK3588_TXCLK_DLY_ENA_GMAC_ENABLE;
+		tx_enable_mask = RK3588_TXCLK_DLY_ENA_GMAC_MASK;
+		intf_sel = RK3588_GMAC_PHY_INTF_SEL_RGMII;
+		intf_sel_mask = RK3588_GMAC_PHY_INTF_SEL_MASK;
+		clk_mode = RK3588_GMAC_CLK_RGMII_MODE;
+		clk_mode_mask = RK3588_GMAC_CLK_RGMII_MODE_MASK;
+	}
+
+	rk_clrsetreg(offset_con,
+		     RK3588_CLK_TX_DL_CFG_GMAC_MASK |
+		     RK3588_CLK_RX_DL_CFG_GMAC_MASK,
+		     pdata->tx_delay << RK3588_CLK_TX_DL_CFG_GMAC_SHIFT |
+		     rx_delay);
+
+	rk_clrsetreg(&grf->soc_con7, tx_enable_mask | rx_enable_mask,
+		     tx_enable | rx_enable);
+
+	rk_clrsetreg(&php_grf->gmac_con0, intf_sel_mask, intf_sel);
+	rk_clrsetreg(&php_grf->clk_con1, clk_mode_mask, clk_mode);
 }
 
 static void rv1126_set_to_rmii(struct gmac_rockchip_platdata *pdata)
@@ -886,6 +1293,33 @@ static void rv1126_set_to_rgmii(struct gmac_rockchip_platdata *pdata)
 }
 #endif
 
+#ifdef CONFIG_DWC_ETH_QOS
+static void rk3588_set_clock_selection(struct gmac_rockchip_platdata *pdata)
+{
+	struct rk3588_php_grf *php_grf;
+	unsigned int val, mask;
+
+	enum {
+		RK3588_GMAC_CLK_SELET_SHIFT = 0x4,
+		RK3588_GMAC_CLK_SELET_MASK = BIT(4),
+		RK3588_GMAC_CLK_SELET_CRU = BIT(4),
+		RK3588_GMAC_CLK_SELET_IO = 0,
+	};
+
+	php_grf = syscon_get_first_range(ROCKCHIP_SYSCON_PHP_GRF);
+	val = pdata->clock_input ? RK3588_GMAC_CLK_SELET_IO :
+				   RK3588_GMAC_CLK_SELET_CRU;
+	mask = RK3588_GMAC_CLK_SELET_MASK;
+
+	if (pdata->bus_id == 1) {
+		val <<= 5;
+		mask <<= 5;
+	}
+
+	rk_clrsetreg(&php_grf->clk_con1, mask, val);
+}
+#endif
+
 static int gmac_rockchip_probe(struct udevice *dev)
 {
 	struct gmac_rockchip_platdata *pdata = dev_get_platdata(dev);
@@ -920,8 +1354,17 @@ static int gmac_rockchip_probe(struct udevice *dev)
 	if (ret)
 		return ret;
 
+	pdata->phy_interface = eth_pdata->phy_interface;
+
+	if (ops->set_clock_selection)
+		ops->set_clock_selection(pdata);
+
+	if (pdata->integrated_phy && ops->integrated_phy_powerup)
+		ops->integrated_phy_powerup(pdata);
+
 	switch (eth_pdata->phy_interface) {
 	case PHY_INTERFACE_MODE_RGMII:
+	case PHY_INTERFACE_MODE_RGMII_RXID:
 		/*
 		 * If the gmac clock is from internal pll, need to set and
 		 * check the return value for gmac clock at RGMII mode. If
@@ -933,6 +1376,9 @@ static int gmac_rockchip_probe(struct udevice *dev)
 			if (rate != 125000000)
 				return -EINVAL;
 		}
+
+		if (eth_pdata->phy_interface == PHY_INTERFACE_MODE_RGMII_RXID)
+			pdata->rx_delay = -1;
 
 		/* Set to RGMII mode */
 		if (ops->set_to_rgmii)
@@ -1012,8 +1458,8 @@ static int gmac_rockchip_eth_start(struct udevice *dev)
 	struct rockchip_eth_dev *priv = dev_get_priv(dev);
 	struct rk_gmac_ops *ops =
 		(struct rk_gmac_ops *)dev_get_driver_data(dev);
-#ifndef CONFIG_DWC_ETH_QOS
 	struct gmac_rockchip_platdata *pdata = dev_get_platdata(dev);
+#ifndef CONFIG_DWC_ETH_QOS
 	struct dw_eth_pdata *dw_pdata;
 	struct eth_pdata *eth_pdata;
 #endif
@@ -1029,7 +1475,7 @@ static int gmac_rockchip_eth_start(struct udevice *dev)
 #endif
 	if (ret)
 		return ret;
-	ret = ops->fix_mac_speed(priv);
+	ret = ops->fix_mac_speed(pdata, priv);
 	if (ret)
 		return ret;
 
@@ -1075,7 +1521,9 @@ const struct rk_gmac_ops rk1808_gmac_ops = {
 
 const struct rk_gmac_ops rk3228_gmac_ops = {
 	.fix_mac_speed = rk3228_gmac_fix_mac_speed,
+	.set_to_rmii = rk3228_gmac_set_to_rmii,
 	.set_to_rgmii = rk3228_gmac_set_to_rgmii,
+	.integrated_phy_powerup = rk3228_gmac_integrated_phy_powerup,
 };
 
 const struct rk_gmac_ops rk3288_gmac_ops = {
@@ -1090,7 +1538,9 @@ const struct rk_gmac_ops rk3308_gmac_ops = {
 
 const struct rk_gmac_ops rk3328_gmac_ops = {
 	.fix_mac_speed = rk3328_gmac_fix_mac_speed,
+	.set_to_rmii = rk3328_gmac_set_to_rmii,
 	.set_to_rgmii = rk3328_gmac_set_to_rgmii,
+	.integrated_phy_powerup = rk3328_gmac_integrated_phy_powerup,
 };
 
 const struct rk_gmac_ops rk3368_gmac_ops = {
@@ -1114,6 +1564,13 @@ const struct rk_gmac_ops rk3568_gmac_ops = {
 	.set_to_rmii = rk3568_set_to_rmii,
 };
 
+const struct rk_gmac_ops rk3588_gmac_ops = {
+	.fix_mac_speed = rk3588_set_rgmii_speed,
+	.set_to_rgmii = rk3588_set_to_rgmii,
+	.set_to_rmii = rk3588_set_to_rmii,
+	.set_clock_selection = rk3588_set_clock_selection,
+};
+
 const struct rk_gmac_ops rv1126_gmac_ops = {
 	.fix_mac_speed = rv1126_set_rgmii_speed,
 	.set_to_rgmii = rv1126_set_to_rgmii,
@@ -1123,29 +1580,65 @@ const struct rk_gmac_ops rv1126_gmac_ops = {
 
 static const struct udevice_id rockchip_gmac_ids[] = {
 #ifndef CONFIG_DWC_ETH_QOS
+#ifdef CONFIG_ROCKCHIP_PX30
 	{ .compatible = "rockchip,px30-gmac",
 	  .data = (ulong)&px30_gmac_ops },
+#endif
+
+#ifdef CONFIG_ROCKCHIP_RK1808
 	{ .compatible = "rockchip,rk1808-gmac",
 	  .data = (ulong)&rk1808_gmac_ops },
+#endif
+
+#ifdef CONFIG_ROCKCHIP_RK3228
 	{ .compatible = "rockchip,rk3228-gmac",
 	  .data = (ulong)&rk3228_gmac_ops },
+#endif
+
+#ifdef CONFIG_ROCKCHIP_RK3288
 	{ .compatible = "rockchip,rk3288-gmac",
 	  .data = (ulong)&rk3288_gmac_ops },
+#endif
+
+#ifdef CONFIG_ROCKCHIP_RK3308
 	{ .compatible = "rockchip,rk3308-mac",
 	  .data = (ulong)&rk3308_gmac_ops },
+#endif
+
+#ifdef CONFIG_ROCKCHIP_RK3328
 	{ .compatible = "rockchip,rk3328-gmac",
 	  .data = (ulong)&rk3328_gmac_ops },
+#endif
+
+#ifdef CONFIG_ROCKCHIP_RK3368
 	{ .compatible = "rockchip,rk3368-gmac",
 	  .data = (ulong)&rk3368_gmac_ops },
+#endif
+
+#ifdef CONFIG_ROCKCHIP_RK3399
 	{ .compatible = "rockchip,rk3399-gmac",
 	  .data = (ulong)&rk3399_gmac_ops },
+#endif
+
+#ifdef CONFIG_ROCKCHIP_RV1108
 	{ .compatible = "rockchip,rv1108-gmac",
 	  .data = (ulong)&rv1108_gmac_ops },
+#endif
 #else
+#ifdef CONFIG_ROCKCHIP_RK3568
 	{ .compatible = "rockchip,rk3568-gmac",
 	  .data = (ulong)&rk3568_gmac_ops },
+#endif
+
+#ifdef CONFIG_ROCKCHIP_RK3588
+	{ .compatible = "rockchip,rk3588-gmac",
+	  .data = (ulong)&rk3588_gmac_ops },
+#endif
+
+#ifdef CONFIG_ROCKCHIP_RV1126
 	{ .compatible = "rockchip,rv1126-gmac",
 	  .data = (ulong)&rv1126_gmac_ops },
+#endif
 #endif
 	{ }
 };

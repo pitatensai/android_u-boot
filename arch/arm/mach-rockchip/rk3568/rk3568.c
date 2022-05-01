@@ -4,12 +4,16 @@
  * SPDX-License-Identifier:     GPL-2.0+
  */
 #include <common.h>
+#include <clk.h>
+#include <dm.h>
 #include <asm/io.h>
 #include <asm/arch/cpu.h>
 #include <asm/arch/hardware.h>
 #include <asm/arch/grf_rk3568.h>
 #include <asm/arch/rk_atags.h>
 #include <linux/libfdt.h>
+#include <fdt_support.h>
+#include <asm/arch/clock.h>
 #include <dt-bindings/clock/rk3568-cru.h>
 
 DECLARE_GLOBAL_DATA_PTR;
@@ -29,6 +33,7 @@ DECLARE_GLOBAL_DATA_PTR;
 #define GRF_GPIO1C_DS_3		0x22c
 #define GRF_GPIO1D_DS_0		0x230
 #define GRF_GPIO1D_DS_1		0x234
+#define GRF_GPIO1D_DS_2		0x238
 #define GRF_SOC_CON4		0x510
 #define EDP_PHY_GRF_BASE	0xfdcb0000
 #define EDP_PHY_GRF_CON0	(EDP_PHY_GRF_BASE + 0x00)
@@ -225,6 +230,12 @@ enum {
 	GPIO2B4_GMAC0_TXD1,
 	GPIO2B4_UART1_TXM0,
 
+	/* GRF_GPIO2C_IOMUX_L */
+	GPIO2C2_SHIFT		= 8,
+	GPIO2C2_MASK		= GENMASK(10, 8),
+	GPIO2C2_GPIO		= 0,
+	GPIO2C2_GMAC0_MCLKINOUT	= 2,
+
 	/* GRF_GPIO2C_IOMUX_H */
 	GPIO2C6_SHIFT		= 8,
 	GPIO2C6_MASK		= GENMASK(10, 8),
@@ -393,6 +404,14 @@ enum {
 	GPIO4A4_GMAC1_TXD0M1,
 	GPIO4A4_UART9_TXM2,
 	GPIO4A4_I2S2_LRCKTXM1,
+
+	/* GRF_GPIO4C_IOMUX_L */
+	GPIO4C1_SHIFT		= 4,
+	GPIO4C1_MASK		= GENMASK(6, 4),
+	GPIO4C1_GPIO		= 0,
+	GPIO4C1_CIF_CLKIN,
+	GPIO4C1_EBC_SDCLK,
+	GPIO4C1_GMAC1_MCLKINOUTM1,
 
 	/* GRF_GPIO4C_IOMUX_H */
 	GPIO4C6_SHIFT		= 8,
@@ -835,11 +854,13 @@ int arch_cpu_init(void)
 #endif
 
 #ifndef CONFIG_TPL_BUILD
-	/* set the fspi d0 cs0 to level 1 */
+	/* set the fspi d0~3 cs0 to level 2 */
 	if (get_bootdev_by_brom_bootsource() == BOOT_TYPE_SPI_NOR ||
 	    get_bootdev_by_brom_bootsource() == BOOT_TYPE_SPI_NAND) {
-		writel(0x3f000300, GRF_BASE + GRF_GPIO1D_DS_0);
-		writel(0x3f000300, GRF_BASE + GRF_GPIO1D_DS_1);
+		writel(0x3f000700, GRF_BASE + GRF_GPIO1C_DS_3);
+		writel(0x3f000700, GRF_BASE + GRF_GPIO1D_DS_0);
+		writel(0x3f3f0707, GRF_BASE + GRF_GPIO1D_DS_1);
+		writel(0x003f0007, GRF_BASE + GRF_GPIO1D_DS_2);
 	}
 #endif
 
@@ -903,7 +924,7 @@ int arch_cpu_init(void)
 }
 
 #ifdef CONFIG_SPL_BUILD
-int spl_fit_standalone_release(uintptr_t entry_point)
+int spl_fit_standalone_release(char *id, uintptr_t entry_point)
 {
 	/* Reset the scr1 */
 	writel(0x04000400, CRU_BASE + CRU_SOFTRST_CON26);
@@ -918,6 +939,57 @@ int spl_fit_standalone_release(uintptr_t entry_point)
 }
 #endif
 
+#if CONFIG_IS_ENABLED(CLK_SCMI)
+#include <dm.h>
+/*
+ * armclk: 1104M:
+ *	rockchip,clk-init = <1104000000>,
+ *	vdd_cpu : regulator-init-microvolt = <825000>;
+ * armclk: 1416M(by default):
+ *	rockchip,clk-init = <1416000000>,
+ *	vdd_cpu : regulator-init-microvolt = <900000>;
+ * armclk: 1608M:
+ *	rockchip,clk-init = <1608000000>,
+ *	vdd_cpu : regulator-init-microvolt = <975000>;
+ */
+
+int set_armclk_rate(void)
+{
+	struct clk clk;
+	u32 *rates = NULL;
+	int ret, size, num_rates;
+
+	ret = rockchip_get_scmi_clk(&clk.dev);
+	if (ret) {
+		printf("Failed to get scmi clk dev\n");
+		return ret;
+	}
+
+	size = dev_read_size(clk.dev, "rockchip,clk-init");
+	if (size < 0)
+		return 0;
+
+	num_rates = size / sizeof(u32);
+	rates = calloc(num_rates, sizeof(u32));
+	if (!rates)
+		return -ENOMEM;
+
+	ret = dev_read_u32_array(clk.dev, "rockchip,clk-init",
+				 rates, num_rates);
+	if (ret) {
+		printf("Cannot get rockchip,clk-init reg\n");
+		return -EINVAL;
+	}
+	clk.id = 0;
+	ret = clk_set_rate(&clk, rates[clk.id]);
+	if (ret < 0) {
+		printf("Failed to set armclk\n");
+		return ret;
+	}
+	return 0;
+}
+#endif
+
 #define CRU_NODE_FDT_PATH	"/clock-controller@fdd20000"
 #define CRU_RATE_CNT_MIN	6
 #define CRU_PARENT_CNT_MIN	3
@@ -925,6 +997,116 @@ int spl_fit_standalone_release(uintptr_t entry_point)
 #define RKVDEC_NODE_FDT_PATH    "/rkvdec@fdf80200"
 #define RKVDEC_NORMAL_RATE_CNT_MIN     5
 #define RKVDEC_RATE_CNT_MIN     4
+
+#define GMAC0_NODE_FDT_PATH    "/ethernet@fe2a0000"
+#define GMAC1_NODE_FDT_PATH    "/ethernet@fe010000"
+
+#define GMAC0_CLKIN_NODE_FDT_PATH "/external-gmac0-clock"
+#define GMAC1_CLKIN_NODE_FDT_PATH "/external-gmac1-clock"
+
+#define GMAC1M0_MIIM_PINCTRL_PATH "/pinctrl/gmac1/gmac1m0-miim"
+
+static int rk3568_board_fdt_fixup_ethernet(const void *blob, int id)
+{
+	int gmac_node, clkin_node, miim_node, len;
+	const char *gmac_path, *clkin_path;
+	void *fdt = (void *)gd->fdt_blob;
+	u32 phandle, *pp;
+
+	/* get the gmac node and clockin node path at DTB */
+	if (id == 1) {
+		gmac_path = GMAC1_NODE_FDT_PATH;
+		clkin_path = GMAC1_CLKIN_NODE_FDT_PATH;
+	} else {
+		gmac_path = GMAC0_NODE_FDT_PATH;
+		clkin_path = GMAC0_CLKIN_NODE_FDT_PATH;
+	}
+
+	gmac_node = fdt_path_offset(gd->fdt_blob, gmac_path);
+	if (gmac_node < 0)
+		return 0;
+
+	/* only fixes the RGMII clock input mode for gmac node */
+	if (fdt_stringlist_search(fdt, gmac_node,
+				  "status", "disabled") < 0) {
+		if (fdt_stringlist_search(fdt, gmac_node,
+					  "phy-mode", "rgmii") >= 0) {
+			if (fdt_stringlist_search(fdt, gmac_node,
+						  "clock_in_out", "output") >= 0) {
+				struct rk3568_grf *grf = (void *)GRF_BASE;
+
+				clkin_node = fdt_path_offset(fdt, clkin_path);
+				if (clkin_node < 0)
+					return 0;
+				phandle = fdt_get_phandle(blob, clkin_node);
+				if (!phandle)
+					return 0;
+				/*
+				 * before fixed:
+				 *	assigned-clock-parents = <&cru SCLK_GMAC0_RGMII_SPEED>, <&cru CLK_MAC0_2TOP>;
+				 * after fixed:
+				 *	assigned-clock-parents = <&cru SCLK_GMAC0_RGMII_SPEED>, <&gmac_clkin 0>;
+				 */
+				pp = (u32 *)fdt_getprop(blob, gmac_node,
+							"assigned-clock-parents",
+							&len);
+				if (!pp)
+					return 0;
+				if ((len / 8) >= 2) {
+					pp[2] = cpu_to_fdt32(phandle);
+					pp[3] = cpu_to_fdt32(0);
+				}
+
+				/*
+				 * before fixed:
+				 *	clock_in_out = "output";
+				 * after fixed:
+				 *	clock_in_out = "input";
+				 */
+
+				do_fixup_by_path(fdt, gmac_path, "clock_in_out",
+						 "input", 6, 0);
+				/*
+				 * set gmac_clkinout pin iomux for rgmii
+				 * input mode.
+				 */
+				if (!id) {
+					rk_clrsetreg(&grf->gpio2c_iomux_l,
+						     GPIO2C2_MASK,
+						     GPIO2C2_GMAC0_MCLKINOUT << GPIO2C2_SHIFT);
+				} else {
+					/*
+					 * get the miim pins phandle to check
+					 * m0 or m1 for gmac1_clkinout.
+					 */
+					miim_node = fdt_path_offset(fdt,
+								    GMAC1M0_MIIM_PINCTRL_PATH);
+					if (miim_node < 0)
+						goto gmac1_mclkinoutm1;
+					phandle = fdt_get_phandle(blob, miim_node);
+					if (!phandle)
+						goto gmac1_mclkinoutm1;
+
+					pp = (u32 *)fdt_getprop(blob, gmac_node, "pinctrl-0", &len);
+					if (!pp)
+						goto gmac1_mclkinoutm1;
+					if (pp[0] == cpu_to_fdt32(phandle)) {
+						rk_clrsetreg(&grf->gpio3c_iomux_l,
+							     GPIO3C0_MASK,
+							     GPIO3C0_GMAC1_MCLKINOUTM0 << GPIO3C0_SHIFT);
+						return 0;
+					}
+gmac1_mclkinoutm1:
+					rk_clrsetreg(&grf->gpio4c_iomux_l,
+						     GPIO4C1_MASK,
+						     GPIO4C1_GMAC1_MCLKINOUTM1 << GPIO4C1_SHIFT);
+				}
+			}
+		}
+	}
+
+	return 0;
+}
 
 int rk_board_fdt_fixup(const void *blob)
 {
@@ -993,5 +1175,24 @@ int rk_board_fdt_fixup(const void *blob)
 		pp[3] = cpu_to_fdt32(400000000);
 	}
 
+	rk3568_board_fdt_fixup_ethernet(blob, 0);
+	rk3568_board_fdt_fixup_ethernet(blob, 1);
+
 	return 0;
 }
+
+#if !defined(CONFIG_SPL_BUILD) && defined(CONFIG_ROCKCHIP_DMC_FSP)
+int rk_board_init(void)
+{
+	struct udevice *dev;
+	u32 ret = 0;
+
+	ret = uclass_get_device_by_driver(UCLASS_DMC, DM_GET_DRIVER(dmc_fsp), &dev);
+	if (ret) {
+		printf("dmc_fsp failed, ret=%d\n", ret);
+		return 0;
+	}
+
+	return 0;
+}
+#endif

@@ -30,6 +30,7 @@ struct block_drvr {
 #define PART_TYPE_AMIGA		0x04
 #define PART_TYPE_EFI		0x05
 #define PART_TYPE_RKPARM	0x06
+#define PART_TYPE_RKRAM		0x07
 
 /* maximum number of partition entries supported by search */
 #define DOS_ENTRY_NUMBERS	8
@@ -37,6 +38,8 @@ struct block_drvr {
 #define MAC_ENTRY_NUMBERS	64
 #define AMIGA_ENTRY_NUMBERS	8
 #define RKPARM_ENTRY_NUMBERS	128
+#define RKRAM_ENTRY_NUMBERS	6
+
 /*
  * Type string for U-Boot bootable partitions
  */
@@ -189,6 +192,20 @@ int blk_get_device_part_str(const char *ifname, const char *dev_part_str,
 int part_get_info_by_name(struct blk_desc *dev_desc,
 			      const char *name, disk_partition_t *info);
 
+/**
+ * part_get_info_by_name_strict() - Search for a partition by name
+ *                                  among all available registered partitions
+ *				    with strict name match
+ *
+ * @param dev_desc - block device descriptor
+ * @param gpt_name - the specified table entry name to be match strictly
+ * @param info - returns the disk partition info
+ *
+ * @return - the partition number on match (starting on 1), -1 on no match,
+ * otherwise error
+ */
+int part_get_info_by_name_strict(struct blk_desc *dev_desc, const char *name,
+				 disk_partition_t *info);
 /**
  * part_set_generic_name() - create generic partition like hda1 or sdb2
  *

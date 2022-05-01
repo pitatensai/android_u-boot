@@ -18,12 +18,7 @@ SIG_UBOOT="${FIT_DIR}/uboot.data2sign"
 SIG_BOOT="${FIT_DIR}/boot.data2sign"
 SIG_RECOVERY="${FIT_DIR}/recovery.data2sign"
 # offs
-OFFS_NS_UBOOT="0xc00"
-OFFS_S_UBOOT="0xc00"
-OFFS_NS_BOOT="0x800"
-OFFS_S_BOOT="0xc00"
-OFFS_NS_RECOVERY="0x800"
-OFFS_S_RECOVERY="0xc00"
+OFFS_DATA="0x1000"
 # file
 CHIP_FILE="arch/arm/lib/.asm-offsets.s.cmd"
 # placeholder address
@@ -32,12 +27,14 @@ KERNEL_ADDR_PLACEHOLDER="0xffffff01"
 RAMDISK_ADDR_PLACEHOLDER="0xffffff02"
 # tools
 MKIMAGE="./tools/mkimage"
+RK_SIGN_TOOL="../rkbin/tools/rk_sign_tool"
 FIT_UNPACK="./scripts/fit-unpack.sh"
 CHECK_SIGN="./tools/fit_check_sign"
 # key
 KEY_DIR="keys/"
 RSA_PRI_KEY="keys/dev.key"
-RSA_PUB_KEY="keys/dev.crt"
+RSA_PUB_KEY="keys/dev.pubkey"
+RSA_CRT_KEY="keys/dev.crt"
 SIGNATURE_KEY_NODE="/signature/key-dev"
 SPL_DTB="spl/u-boot-spl.dtb"
 UBOOT_DTB="u-boot.dtb"
@@ -99,13 +96,27 @@ function check_its()
 	done
 }
 
+function check_rsa_keys()
+{
+	if [ ! -f ${RSA_PRI_KEY} ]; then
+		echo "ERROR: No ${RSA_PRI_KEY} "
+		exit 1
+	elif [ ! -f ${RSA_PUB_KEY} ]; then
+		echo "ERROR: No ${RSA_PUB_KEY} "
+		exit 1
+	elif [ ! -f ${RSA_CRT_KEY} ]; then
+		echo "ERROR: No ${RSA_CRT_KEY} "
+		exit 1
+	fi
+}
+
 function validate_arg()
 {
 	case $1 in
 		--no-check|--spl-new|--burn-key-hash)
 			shift=1
 			;;
-		--ini-trust|--ini-loader|--rollback-index-boot|--rollback-index-recovery|--rollback-index-uboot|--boot_img|--recovery_img|--version-uboot|--version-boot|--version-recovery)
+		--ini-trust|--ini-loader|--rollback-index-boot|--rollback-index-recovery|--rollback-index-uboot|--boot_img|--recovery_img|--version-uboot|--version-boot|--version-recovery|--chip)
 			shift=2
 			;;
 		*)
@@ -130,6 +141,10 @@ function fit_process_args()
 				;;
 			--boot_img)     # boot.img
 				ARG_BOOT_IMG=$2
+				shift 2
+				;;
+			--chip)
+				ARG_CHIP=$2
 				shift 2
 				;;
 			--recovery_img) # recovery.img
@@ -220,7 +235,7 @@ function fit_gen_uboot_itb()
 	check_its ${ITS_UBOOT}
 
 	if [ "${ARG_SIGN}" != "y" ]; then
-		${MKIMAGE} -f ${ITS_UBOOT} -E -p ${OFFS_NS_UBOOT} ${ITB_UBOOT} -v ${ARG_VER_UBOOT}
+		${MKIMAGE} -f ${ITS_UBOOT} -E -p ${OFFS_DATA} ${ITB_UBOOT} -v ${ARG_VER_UBOOT}
 		if [ "${ARG_SPL_NEW}" == "y" ]; then
 			./make.sh --spl ${ARG_INI_LOADER}
 			echo "pack loader with new: spl/u-boot-spl.bin"
@@ -228,13 +243,7 @@ function fit_gen_uboot_itb()
 			./make.sh loader ${ARG_INI_LOADER}
 		fi
 	else
-		if [ ! -f ${RSA_PRI_KEY} ]; then
-			echo "ERROR: No ${RSA_PRI_KEY} "
-			exit 1
-		elif [ ! -f ${RSA_PUB_KEY} ]; then
-			echo "ERROR: No ${RSA_PUB_KEY} "
-			exit 1
-		fi
+		check_rsa_keys
 
 		if ! grep -q '^CONFIG_SPL_FIT_SIGNATURE=y' .config ; then
 			echo "ERROR: CONFIG_SPL_FIT_SIGNATURE is disabled"
@@ -258,17 +267,22 @@ function fit_gen_uboot_itb()
 		# Generally, boot.img is signed before uboot.img, so the ras key can be found
 		# in u-boot.dtb. If not found, let's insert rsa key anyway.
 		if ! fdtget -l ${UBOOT_DTB} /signature >/dev/null 2>&1 ; then
-			${MKIMAGE} -f ${ITS_UBOOT} -k ${KEY_DIR} -K ${UBOOT_DTB} -E -p ${OFFS_S_UBOOT} -r ${ITB_UBOOT} -v ${ARG_VER_UBOOT}
+			${MKIMAGE} -f ${ITS_UBOOT} -k ${KEY_DIR} -K ${UBOOT_DTB} -E -p ${OFFS_DATA} -r ${ITB_UBOOT} -v ${ARG_VER_UBOOT}
 			echo "## Adding RSA public key into ${UBOOT_DTB}"
 		fi
 
 		# Pack
-		${MKIMAGE} -f ${ITS_UBOOT} -k ${KEY_DIR} -K ${SPL_DTB} -E -p ${OFFS_S_UBOOT} -r ${ITB_UBOOT} -v ${ARG_VER_UBOOT}
+		${MKIMAGE} -f ${ITS_UBOOT} -k ${KEY_DIR} -K ${SPL_DTB} -E -p ${OFFS_DATA} -r ${ITB_UBOOT} -v ${ARG_VER_UBOOT}
 		mv ${SIG_BIN} ${SIG_UBOOT}
 
 		# burn-key-hash
 		if [ "${ARG_BURN_KEY_HASH}" == "y" ]; then
-			fdtput -tx ${SPL_DTB} ${SIGNATURE_KEY_NODE} burn-key-hash 0x1
+			if grep -q '^CONFIG_SPL_FIT_HW_CRYPTO=y' .config ; then
+				fdtput -tx ${SPL_DTB} ${SIGNATURE_KEY_NODE} burn-key-hash 0x1
+			else
+				echo "ERROR: --burn-key-hash requires CONFIG_SPL_FIT_HW_CRYPTO=y"
+				exit 1
+			fi
 		fi
 
 		# rollback-index read back check
@@ -361,15 +375,9 @@ function fit_gen_boot_itb()
 	fi
 
 	if [ "${ARG_SIGN}" != "y" ]; then
-		${MKIMAGE} -f ${ITS_BOOT} -E -p ${OFFS_NS_BOOT} ${ITB_BOOT} -v ${ARG_VER_BOOT}
+		${MKIMAGE} -f ${ITS_BOOT} -E -p ${OFFS_DATA} ${ITB_BOOT} -v ${ARG_VER_BOOT}
 	else
-		if [ ! -f ${RSA_PRI_KEY}  ]; then
-			echo "ERROR: No ${RSA_PRI_KEY}"
-			exit 1
-		elif [ ! -f ${RSA_PUB_KEY}  ]; then
-			echo "ERROR: No ${RSA_PUB_KEY}"
-			exit 1
-		fi
+		check_rsa_keys
 
 		if ! grep -q '^CONFIG_FIT_SIGNATURE=y' .config ; then
 			echo "ERROR: CONFIG_FIT_SIGNATURE is disabled"
@@ -401,7 +409,7 @@ function fit_gen_boot_itb()
 			sed -i "s/rollback-index = ${VERSION}/rollback-index = <${ARG_ROLLBACK_IDX_BOOT}>;/g" ${ITS_BOOT}
 		fi
 
-		${MKIMAGE} -f ${ITS_BOOT} -k ${KEY_DIR} -K ${UBOOT_DTB} -E -p ${OFFS_S_BOOT} -r ${ITB_BOOT} -v ${ARG_VER_BOOT}
+		${MKIMAGE} -f ${ITS_BOOT} -k ${KEY_DIR} -K ${UBOOT_DTB} -E -p ${OFFS_DATA} -r ${ITB_BOOT} -v ${ARG_VER_BOOT}
 		mv ${SIG_BIN} ${SIG_BOOT}
 
 		# rollback-index read back check
@@ -449,15 +457,9 @@ function fit_gen_recovery_itb()
 	fi
 
 	if [ "${ARG_SIGN}" != "y" ]; then
-		${MKIMAGE} -f ${ITS_RECOVERY} -E -p ${OFFS_NS_RECOVERY} ${ITB_RECOVERY} -v ${ARG_VER_RECOVERY}
+		${MKIMAGE} -f ${ITS_RECOVERY} -E -p ${OFFS_DATA} ${ITB_RECOVERY} -v ${ARG_VER_RECOVERY}
 	else
-		if [ ! -f ${RSA_PRI_KEY}  ]; then
-			echo "ERROR: No ${RSA_PRI_KEY}"
-			exit 1
-		elif [ ! -f ${RSA_PUB_KEY}  ]; then
-			echo "ERROR: No ${RSA_PUB_KEY}"
-			exit 1
-		fi
+		check_rsa_keys
 
 		if ! grep -q '^CONFIG_FIT_SIGNATURE=y' .config ; then
 			echo "ERROR: CONFIG_FIT_SIGNATURE is disabled"
@@ -489,7 +491,7 @@ function fit_gen_recovery_itb()
 			sed -i "s/rollback-index = ${VERSION}/rollback-index = <${ARG_ROLLBACK_IDX_RECOVERY}>;/g" ${ITS_RECOVERY}
 		fi
 
-		${MKIMAGE} -f ${ITS_RECOVERY} -k ${KEY_DIR} -K ${UBOOT_DTB} -E -p ${OFFS_S_RECOVERY} -r ${ITB_RECOVERY} -v ${ARG_VER_RECOVERY}
+		${MKIMAGE} -f ${ITS_RECOVERY} -k ${KEY_DIR} -K ${UBOOT_DTB} -E -p ${OFFS_DATA} -r ${ITB_RECOVERY} -v ${ARG_VER_RECOVERY}
 		mv ${SIG_BIN} ${SIG_RECOVERY}
 
 		# rollback-index read back check
@@ -578,6 +580,18 @@ function fit_gen_recovery_img()
 	fi
 }
 
+function fit_gen_loader()
+{
+	if grep -Eq '^CONFIG_FIT_SIGNATURE=y' .config ; then
+		${RK_SIGN_TOOL} cc --chip ${ARG_CHIP: 2: 6}
+		${RK_SIGN_TOOL} sl --key ${RSA_PRI_KEY} --pubkey ${RSA_PUB_KEY} --loader *_loader_*.bin
+		if [ $? -ne 0 ]; then
+			echo "ERROR: ${RK_SIGN_TOOL} failed to sign loader"
+			exit 1
+		fi
+	fi
+}
+
 function fit_msg_uboot()
 {
 	if [ "${ARG_SIGN}" != "y" ]; then
@@ -649,7 +663,12 @@ function fit_msg_recovery()
 function fit_msg_loader()
 {
 	LOADER=`ls *loader*.bin`
-	echo "Image(no-signed):  ${LOADER} (with spl, ddr, usbplug) is ready"
+
+	if grep -q '^CONFIG_FIT_SIGNATURE=y' .config ; then
+		echo "Image(signed):  ${LOADER} (with spl, ddr, usbplug) is ready"
+	else
+		echo "Image(no-signed):  ${LOADER} (with spl, ddr, usbplug) is ready"
+	fi
 }
 
 fit_process_args $*
@@ -669,6 +688,7 @@ else
 	fi
 	fit_gen_uboot_itb
 	fit_gen_uboot_img
+	fit_gen_loader
 
 	echo
 	fit_msg_uboot
