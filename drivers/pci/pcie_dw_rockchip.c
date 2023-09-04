@@ -35,6 +35,8 @@ struct rk_pcie {
 	struct gpio_desc	rst_gpio;
 	struct pci_region	io;
 	struct pci_region	mem;
+	bool		is_bifurcation;
+	u32 gen;
 };
 
 enum {
@@ -514,11 +516,20 @@ static int rk_pcie_link_up(struct rk_pcie *priv, u32 cap_speed)
 	/* DW pre link configurations */
 	rk_pcie_configure(priv, cap_speed);
 
-	/* Rest the device */
+	/* Release the device */
 	if (dm_gpio_is_valid(&priv->rst_gpio)) {
-		dm_gpio_set_value(&priv->rst_gpio, 0);
-		msleep(1000);
+		/*
+		 * T_PVPERL (Power stable to PERST# inactive) should be a minimum of 100ms.
+		 * We add a 200ms by default for sake of hoping everthings
+		 * work fine.
+		 */
+		msleep(200);
 		dm_gpio_set_value(&priv->rst_gpio, 1);
+		/*
+		 * Add this 20ms delay because we observe link is always up stably after it and
+		 * could help us save 20ms for scanning devices.
+		 */
+		msleep(20);
 	}
 
 	rk_pcie_disable_ltssm(priv);
@@ -528,23 +539,23 @@ static int rk_pcie_link_up(struct rk_pcie *priv, u32 cap_speed)
 	/* Enable LTSSM */
 	rk_pcie_enable_ltssm(priv);
 
-	for (retries = 0; retries < 10000000; retries++) {
+	for (retries = 0; retries < 50; retries++) {
 		if (is_link_up(priv)) {
 			dev_info(priv->dev, "PCIe Link up, LTSSM is 0x%x\n",
 				 rk_pcie_readl_apb(priv, PCIE_CLIENT_LTSSM_STATUS));
 			rk_pcie_debug_dump(priv);
+			/* Link maybe in Gen switch recovery but we need to wait more 1s */
+			msleep(1000);
 			return 0;
 		}
 
 		dev_info(priv->dev, "PCIe Linking... LTSSM is 0x%x\n",
 			 rk_pcie_readl_apb(priv, PCIE_CLIENT_LTSSM_STATUS));
 		rk_pcie_debug_dump(priv);
-		msleep(1000);
+		msleep(10);
 	}
 
 	dev_err(priv->dev, "PCIe-%d Link Fail\n", priv->dev->seq);
-	/* Link maybe in Gen switch recovery but we need to wait more 1s */
-	msleep(1000);
 	return -EINVAL;
 }
 
@@ -553,10 +564,15 @@ static int rockchip_pcie_init_port(struct udevice *dev)
 	int ret;
 	u32 val;
 	struct rk_pcie *priv = dev_get_priv(dev);
+	union phy_configure_opts phy_cfg;
+
+	/* Rest the device */
+	if (dm_gpio_is_valid(&priv->rst_gpio))
+		dm_gpio_set_value(&priv->rst_gpio, 0);
 
 	/* Set power and maybe external ref clk input */
 	if (priv->vpcie3v3) {
-		ret = regulator_set_value(priv->vpcie3v3, 3300000);
+		ret = regulator_set_enable(priv->vpcie3v3, true);
 		if (ret) {
 			dev_err(priv->dev, "failed to enable vpcie3v3 (ret=%d)\n",
 				ret);
@@ -564,7 +580,12 @@ static int rockchip_pcie_init_port(struct udevice *dev)
 		}
 	}
 
-	msleep(1000);
+	if (priv->is_bifurcation) {
+		phy_cfg.pcie.is_bifurcation = true;
+		ret = generic_phy_configure(&priv->phy, &phy_cfg);
+		if (ret)
+			dev_err(dev, "failed to set bifurcation for phy (ret=%d)\n", ret);
+	}
 
 	ret = generic_phy_init(&priv->phy);
 	if (ret) {
@@ -599,7 +620,7 @@ static int rockchip_pcie_init_port(struct udevice *dev)
 	rk_pcie_writel_apb(priv, 0x0, 0xf00040);
 	rk_pcie_setup_host(priv);
 
-	ret = rk_pcie_link_up(priv, LINK_SPEED_GEN_3);
+	ret = rk_pcie_link_up(priv, priv->gen);
 	if (ret < 0)
 		goto err_link_up;
 
@@ -618,6 +639,7 @@ err_exit_phy:
 static int rockchip_pcie_parse_dt(struct udevice *dev)
 {
 	struct rk_pcie *priv = dev_get_priv(dev);
+	u32 max_link_speed;
 	int ret;
 
 	priv->dbi_base = (void *)dev_read_addr_index(dev, 0);
@@ -663,6 +685,15 @@ static int rockchip_pcie_parse_dt(struct udevice *dev)
 		dev_err(dev, "failed to get pcie phy (ret=%d)\n", ret);
 		return ret;
 	}
+
+	if (dev_read_bool(dev, "rockchip,bifurcation"))
+		priv->is_bifurcation = true;
+
+	ret = ofnode_read_u32(dev->node, "max-link-speed", &max_link_speed);
+	if (ret < 0 || max_link_speed > 4)
+		priv->gen = 0;
+	else
+		priv->gen = max_link_speed;
 
 	return 0;
 }
@@ -741,6 +772,7 @@ static const struct dm_pci_ops rockchip_pcie_ops = {
 
 static const struct udevice_id rockchip_pcie_ids[] = {
 	{ .compatible = "rockchip,rk3568-pcie" },
+	{ .compatible = "rockchip,rk3588-pcie" },
 	{ }
 };
 

@@ -22,8 +22,6 @@
 #define GICC_BASE			0x1013A000
 #define GICD_BASE			0x10139000
 
-#define CONFIG_SUPPORT_EMMC_RPMB
-
 #define CONFIG_SYS_BOOTM_LEN	(64 << 20)	/* 64M */
 
 #define CONFIG_ROCKUSB_G_DNL_PID	0x310C
@@ -44,6 +42,10 @@
 
 #ifndef CONFIG_SPL_BUILD
 #define CONFIG_PREBOOT
+
+/* Nand */
+#define CONFIG_SYS_MAX_NAND_DEVICE	1
+#define CONFIG_SYS_NAND_ONFI_DETECTION
 
 /* usb mass storage */
 #define CONFIG_USB_FUNCTION_MASS_STORAGE

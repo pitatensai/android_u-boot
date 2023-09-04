@@ -37,6 +37,11 @@
 #define GICD_BASE			0xff581000
 #define GICC_BASE			0xff582000
 
+#define OTP_SECURE_BOOT_ENABLE_ADDR	0x0
+#define OTP_SECURE_BOOT_ENABLE_SIZE	1
+#define OTP_RSA_HASH_ADDR		0x10
+#define OTP_RSA_HASH_SIZE		32
+
 #define CONFIG_SYS_BOOTM_LEN	(64 << 20)	/* 64M */
 
 /* MMC/SD IP block */
@@ -62,7 +67,7 @@
 	"scriptaddr=0x00500000\0" \
 	"pxefile_addr_r=0x00600000\0" \
 	"fdt_addr_r=0x01f00000\0" \
-	"kernel_addr_no_bl32_r=0x00280000\0" \
+	"kernel_addr_no_low_bl32_r=0x00280000\0" \
 	"kernel_addr_r=0x00680000\0" \
 	"kernel_addr_c=0x02480000\0" \
 	"ramdisk_addr_r=0x04000000\0"

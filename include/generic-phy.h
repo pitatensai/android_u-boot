@@ -10,6 +10,7 @@
 
 #include <generic-phy-dp.h>
 #include <generic-phy-mipi-dphy.h>
+#include <generic-phy-pcie.h>
 
 enum phy_mode {
 	PHY_MODE_INVALID,
@@ -27,6 +28,19 @@ enum phy_mode {
 union phy_configure_opts {
 	struct phy_configure_opts_mipi_dphy     mipi_dphy;
 	struct phy_configure_opts_dp		dp;
+	struct phy_configure_opts_pcie		pcie;
+};
+
+/**
+ * struct phy_attrs - represents phy attributes
+ * @bus_width: Data path width implemented by PHY
+ * @max_link_rate: Maximum link rate supported by PHY (in Mbps)
+ * @mode: PHY mode
+ */
+struct phy_attrs {
+	u32			bus_width;
+	u32			max_link_rate;
+	enum phy_mode		mode;
 };
 
 /**
@@ -44,6 +58,7 @@ union phy_configure_opts {
 struct phy {
 	struct udevice *dev;
 	unsigned long id;
+	struct phy_attrs attrs;
 };
 
 /*
@@ -53,6 +68,7 @@ struct phy {
  * @reset: reset the phy (optional).
  * @power_on: powering on the phy (optional)
  * @power_off: powering off the phy (optional)
+ * @set_mode: set the mode of the phy
  */
 struct phy_ops {
 	/**
@@ -171,6 +187,8 @@ struct phy_ops {
 	* @return 0 if OK, or a negative error code
 	*/
 	int	(*power_off)(struct phy *phy);
+
+	int     (*set_mode)(struct phy *phy, enum phy_mode mode, int submode);
 };
 
 #ifdef CONFIG_PHY
@@ -232,6 +250,14 @@ int generic_phy_power_on(struct phy *phy);
  */
 int generic_phy_power_off(struct phy *phy);
 
+int generic_phy_set_mode_ext(struct phy *phy, enum phy_mode mode, int submode);
+#define generic_phy_set_mode(phy, mode) \
+	generic_phy_set_mode_ext(phy, mode, 0)
+
+static inline enum phy_mode generic_phy_get_mode(struct phy *phy)
+{
+	return phy->attrs.mode;
+}
 
 /**
  * generic_phy_get_by_index() - Get a PHY device by integer index.
@@ -340,6 +366,15 @@ static inline int generic_phy_get_by_name(struct udevice *user, const char *phy_
 {
 	return 0;
 }
+
+static inline int generic_phy_set_mode_ext(struct phy *phy, enum phy_mode mode,
+					   int submode)
+{
+	return 0;
+}
+
+#define generic_phy_set_mode(phy, mode) \
+	generic_phy_set_mode_ext(phy, mode, 0)
 
 #endif /* CONFIG_PHY */
 

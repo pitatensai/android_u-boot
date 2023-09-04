@@ -18,7 +18,7 @@ enum {
 	PL,
 };
 
-static int misc_require_recovery(u32 bcb_offset)
+static int misc_require_recovery(u32 bcb_offset, int *bcb_recovery_msg)
 {
 	struct bootloader_message *bmsg;
 	struct blk_desc *dev_desc;
@@ -38,14 +38,35 @@ static int misc_require_recovery(u32 bcb_offset)
 
 	cnt = DIV_ROUND_UP(sizeof(struct bootloader_message), dev_desc->blksz);
 	bmsg = memalign(ARCH_DMA_MINALIGN, cnt * dev_desc->blksz);
-	if (blk_dread(dev_desc, part.start + bcb_offset, cnt, bmsg) != cnt)
+	if (blk_dread(dev_desc, part.start + bcb_offset, cnt, bmsg) != cnt) {
 		recovery = 0;
-	else
+	} else {
 		recovery = !strcmp(bmsg->command, "boot-recovery");
+		if (bcb_recovery_msg) {
+			if (!strcmp(bmsg->recovery, "recovery\n--rk_fwupdate\n"))
+				*bcb_recovery_msg = BCB_MSG_RECOVERY_RK_FWUPDATE;
+			else if (!strcmp(bmsg->recovery, "recovery\n--factory_mode=whole") ||
+				 !strcmp(bmsg->recovery, "recovery\n--factory_mode=small"))
+				*bcb_recovery_msg = BCB_MSG_RECOVERY_PCBA;
+		}
+	}
 
 	free(bmsg);
 out:
 	return recovery;
+}
+
+int get_bcb_recovery_msg(void)
+{
+	int bcb_recovery_msg = BCB_MSG_RECOVERY_NONE;
+#ifdef CONFIG_ANDROID_BOOT_IMAGE
+	u32 bcb_offset = android_bcb_msg_sector_offset();
+#else
+	u32 bcb_offset = BCB_MESSAGE_BLK_OFFSET;
+#endif
+	misc_require_recovery(bcb_offset, &bcb_recovery_msg);
+
+	return bcb_recovery_msg;
 }
 
 /*
@@ -68,6 +89,7 @@ int rockchip_get_boot_mode(void)
 	uint32_t reg_boot_mode;
 	char *env_reboot_mode;
 	int clear_boot_reg = 0;
+	int recovery_msg = 0;
 #ifdef CONFIG_ANDROID_BOOT_IMAGE
 	u32 offset = android_bcb_msg_sector_offset();
 #else
@@ -136,11 +158,15 @@ int rockchip_get_boot_mode(void)
 		printf("boot mode: loader\n");
 		boot_mode[PH] = BOOT_MODE_LOADER;
 		clear_boot_reg = 1;
+	} else if (reg_boot_mode == BOOT_DFU) {
+		printf("boot mode: dfu\n");
+		boot_mode[PH] = BOOT_MODE_DFU;
+		clear_boot_reg = 1;
 	} else if (reg_boot_mode == BOOT_FASTBOOT) {
 		printf("boot mode: bootloader\n");
 		boot_mode[PH] = BOOT_MODE_BOOTLOADER;
 		clear_boot_reg = 1;
-	} else if (misc_require_recovery(bcb_offset)) {
+	} else if (misc_require_recovery(bcb_offset, &recovery_msg)) {
 		printf("boot mode: recovery (misc)\n");
 		boot_mode[PM] = BOOT_MODE_RECOVERY;
 	} else {
@@ -215,9 +241,16 @@ int setup_boot_mode(void)
 		printf("enter UMS!\n");
 		env_set("preboot", "setenv preboot; ums mmc 0");
 		break;
+#if defined(CONFIG_CMD_DFU)
+	case BOOT_MODE_DFU:
+		printf("enter DFU!\n");
+		env_set("preboot", "setenv preboot; dfu 0 ${devtype} ${devnum}; rbrom");
+		break;
+#endif
 	case BOOT_MODE_LOADER:
 		printf("enter Rockusb!\n");
 		env_set("preboot", "setenv preboot; rockusb 0 ${devtype} ${devnum}; rbrom");
+		run_command("rockusb 0 ${devtype} ${devnum}", 0);
 		break;
 	case BOOT_MODE_CHARGING:
 		printf("enter charging!\n");

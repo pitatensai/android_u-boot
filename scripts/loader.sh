@@ -25,8 +25,6 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-rm *_loader_*.bin -f
-
 if [ ! -f ${INI} ]; then
 	echo "pack loader failed! Can't find: ${INI}"
 	exit 0
@@ -37,7 +35,11 @@ if [ ${COUNT} -eq 1 ]; then
 	IMG=`sed -n "/PATH=/p" ${INI} | tr -d '\r' | cut -d '=' -f 2`
 	cp ${IMG} ./
 else
+	if [ "$IS_MAC_OS" = true ] ; then
+	./tools/mac/boot_merger ${INI}
+	else
 	./tools/boot_merger ${INI}
+	fi
 fi
 
 echo "pack loader okay! Input: ${INI}"

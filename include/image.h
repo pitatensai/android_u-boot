@@ -933,7 +933,6 @@ int bootz_setup(ulong image, ulong *start, ulong *end);
 #define FIT_LOAD_PROP		"load"
 #define FIT_PRE_LOAD_PROP	"preload"
 #define FIT_ROLLBACK_PROP	"rollback-index"
-#define FIT_KERNEL_FDT_PROP	"kernel-fdt"
 
 /* configuration node */
 #define FIT_KERNEL_PROP		"kernel"
@@ -1426,10 +1425,12 @@ int board_fit_config_name_match(const char *name);
  * @load_addr: load address pointer to image(Uncompressed)
  * @src_addr: source address pointer to image(Compressed maybe)
  * @size: pointer to the image size
+ * @spec: special data. SPL: struct spl_load_info info, U-Boot: NULL.
+ *
  * @return no return value (failure should be handled internally)
  */
 void board_fit_image_post_process(void *fit, int node, ulong *load_addr,
-				  ulong **src_addr, size_t *size);
+				  ulong **src_addr, size_t *size, void *spec);
 
 #endif /* CONFIG_SPL_FIT_IMAGE_POST_PROCESS */
 

@@ -605,6 +605,7 @@ ifeq ($(shell $(CONFIG_SHELL) $(srctree)/scripts/gcc-stack-usage.sh $(CC)),y)
 endif
 
 KBUILD_CFLAGS += $(call cc-option,-Wno-format-nonliteral)
+KBUILD_CFLAGS += $(call cc-disable-warning, address-of-packed-member)
 
 # turn jbsr into jsr for m68k
 ifeq ($(ARCH),m68k)
@@ -650,6 +651,7 @@ HAVE_VENDOR_COMMON_LIB = $(if $(wildcard $(srctree)/board/$(VENDOR)/common/Makef
 libs-y += lib/
 libs-$(HAVE_VENDOR_COMMON_LIB) += board/$(VENDOR)/common/
 libs-$(CONFIG_OF_EMBED) += dts/
+ifneq ($(CONFIG_SPL_BUILD)$(CONFIG_SPL_DECOMP_HEADER),yy)
 libs-y += fs/
 libs-y += net/
 libs-y += disk/
@@ -699,6 +701,7 @@ libs-y += common/
 libs-y += env/
 libs-$(CONFIG_API) += api/
 libs-$(CONFIG_HAS_POST) += post/
+endif
 libs-y += test/
 libs-y += test/dm/
 libs-$(CONFIG_UT_ENV) += test/env/
@@ -707,6 +710,8 @@ libs-$(CONFIG_UT_OVERLAY) += test/overlay/
 libs-y += $(if $(BOARDDIR),board/$(BOARDDIR)/)
 
 libs-y := $(sort $(libs-y))
+
+libs-y += dtoverlay/
 
 u-boot-dirs	:= $(patsubst %/,%,$(filter %/, $(libs-y))) tools examples
 
@@ -906,11 +911,12 @@ else ifeq ($(CONFIG_OF_SEPARATE),y)
 u-boot-dtb.bin: u-boot-nodtb.bin dts/dt.dtb FORCE
 	$(call if_changed,cat)
 
-ifneq ($(wildcard dts/kern.dtb),)
+EMBED_KERN_DTB := $(CONFIG_EMBED_KERNEL_DTB_PATH:"%"=%)
+ifneq ($(wildcard $(EMBED_KERN_DTB)),)
 u-boot-dtb-kern.bin: u-boot-dtb.bin FORCE
 	$(call if_changed,copy)
 	$(call if_changed,truncate)
-u-boot.bin: u-boot-dtb-kern.bin dts/kern.dtb FORCE
+u-boot.bin: u-boot-dtb-kern.bin $(EMBED_KERN_DTB) FORCE
 	$(call if_changed,cat)
 else
 u-boot.bin: u-boot-dtb.bin FORCE
@@ -1481,7 +1487,7 @@ checkarmreloc: u-boot
 		false; \
 	fi
 
-envtools: scripts_basic
+envtools: scripts_basic $(version_h) $(timestamp_h)
 	$(Q)$(MAKE) $(build)=tools/env
 
 tools-only: scripts_basic $(version_h) $(timestamp_h)
@@ -1513,7 +1519,7 @@ CLEAN_DIRS  += $(MODVERDIR) \
 			$(filter-out include, $(shell ls -1 $d 2>/dev/null))))
 
 CLEAN_FILES += include/bmp_logo.h include/bmp_logo_data.h \
-	       boot* u-boot* MLO* SPL System.map fit-dtb.blob *.bin *.img
+	       boot* u-boot* MLO* SPL System.map fit-dtb.blob *.bin *.img *.gz .cc
 
 # Directories & files removed with 'make mrproper'
 MRPROPER_DIRS  += include/config include/generated spl tpl \
@@ -1697,6 +1703,13 @@ endif
 	$(Q)$(MAKE) KBUILD_MODULES=$(if $(CONFIG_MODULES),1)   \
 	$(build)=$(build-dir) $(@:.ko=.o)
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modpost
+
+quiet_cmd_genenv = GENENV $@
+cmd_genenv = $(OBJCOPY) --dump-section .rodata.default_environment=$@ env/common.o; \
+	sed --in-place -e 's/\x00/\x0A/g' $@
+
+u-boot-initial-env: u-boot.bin
+	$(call if_changed,genenv)
 
 # FIXME Should go into a make.lib or something
 # ===========================================================================

@@ -1,182 +1,204 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2019 Fuzhou Rockchip Electronics Co., Ltd
+ * Copyright (c) 2021 Rockchip Electronics Co., Ltd
  */
+
 #include <common.h>
 #include <amp.h>
-#include <boot_rkimg.h>
 #include <bidram.h>
-#include <dm.h>
+#include <boot_rkimg.h>
+#include <config.h>
 #include <sysmem.h>
+#include <asm/gic.h>
+#include <asm/io.h>
 #include <asm/arch/rockchip_smccc.h>
 
-#define AMP_I(fmt, args...)	printf("AMP: "fmt, ##args)
-#define AMP_E(fmt, args...)	printf("AMP Error: "fmt, ##args)
+DECLARE_GLOBAL_DATA_PTR;
 
 /*
- * non-OTA packaged kernel.img & boot.img return the image size on success,
- * and a negative value on error.
+ * [Design Principles]
+ *
+ * [amp.img]
+ *	The amp image with FIT format which consists of non-linux firmwares.
+ *	Please refer to: driver/cpu/amp.its.
+ *
+ *	amp.img generation: ./tools/mkimage -f drivers/cpu/amp.its -E -p 0xe00 amp.img
+ *
+ * [linux]
+ *	We still use the traditional solution for a better compatibility:
+ *	boot.img/recovery.img with FIT format or Android format.
+ *
+ *	The developer need add "/configurations/conf/linux" node to configure:
+ *	description, arch, cpu, thumb, hyp, udelay(optional) properties.
+ *	The addresses depend on U-Boot: kernel_addr_r, fdt_addr_r and
+ *	ramdisk_addr_r. Please refer to: driver/cpu/amp.its.
+ *
+ * [memory management]
+ *	U-Boot is not responsible for memory distribution/fixup any more, please
+ *	handle this on kernel dts "/memory".
+ *
+ * [trust]
+ *	The AMP feature requires trust support.
  */
-static int read_rockchip_image(struct blk_desc *dev_desc,
-			       disk_partition_t *part, void *dst)
+
+#define AMP_PART		"amp"
+#define FIT_HEADER_SIZE		SZ_4K
+
+#define gicd_readl(offset)	readl((void *)GICD_BASE + (offset))
+#define gicd_writel(v, offset)	writel(v, (void *)GICD_BASE + (offset))
+#define LINXU_AMP_NODES		"/rockchip-amp/amp-cpus"
+
+typedef struct boot_args {
+	ulong arg0;
+	ulong arg1;
+	ulong arg2;
+	ulong arg3;
+} boot_args_t;
+
+typedef struct boot_cpu {
+	u32 arch;
+	u32 state;
+	u32 entry;
+	u32 linux_os;
+} boot_cpu_t;
+
+static boot_cpu_t g_bootcpu;
+static u32 g_cpus_boot_by_linux[8];
+
+static u32 fit_get_u32_default(const void *fit, int noffset,
+			       const char *prop, u32 def)
 {
-	struct rockchip_image *img;
-	int header_len = 8;
-	int cnt, ret;
-#ifdef CONFIG_ROCKCHIP_CRC
-	u32 crc32;
-#endif
+	const fdt32_t *val;
 
-	img = memalign(ARCH_DMA_MINALIGN, RK_BLK_SIZE);
-	if (!img)
-		return -ENOMEM;
+	val = fdt_getprop(fit, noffset, prop, NULL);
+	if (!val)
+		return def;
 
-	/* read first block with header imformation */
-	ret = blk_dread(dev_desc, part->start, 1, img);
-	if (ret != 1) {
-		ret = -EIO;
-		goto err;
-	}
-
-	if (img->tag != TAG_KERNEL) {
-		printf("Invalid %s image tag(0x%x)\n", part->name, img->tag);
-		ret = -EINVAL;
-		goto err;
-	}
-
-	/*
-	 * read the rest blks
-	 * total size = image size + 8 bytes header + 4 bytes crc32
-	 */
-	cnt = DIV_ROUND_UP(img->size + 8 + 4, RK_BLK_SIZE);
-	if (!sysmem_alloc_base_by_name((const char *)part->name,
-				       (phys_addr_t)dst,
-				       cnt * dev_desc->blksz)) {
-		ret = -ENXIO;
-		goto err;
-	}
-
-	memcpy(dst, img->image, RK_BLK_SIZE - header_len);
-	ret = blk_dread(dev_desc, part->start + 1, cnt - 1,
-			dst + RK_BLK_SIZE - header_len);
-	if (ret != (cnt - 1)) {
-		printf("Failed to read %s part, ret=%d\n", part->name, ret);
-		ret = -EIO;
-	} else {
-		ret = img->size;
-	}
-
-#ifdef CONFIG_ROCKCHIP_CRC
-	printf("%s image rk crc32 verify... ", part->name);
-	crc32 = crc32_verify((uchar *)(ulong)dst, img->size + 4);
-	if (!crc32) {
-		printf("fail!\n");
-		ret = -EINVAL;
-	} else {
-		printf("okay.\n");
-	}
-#endif
-
-err:
-	free(img);
-	return ret;
+	return fdt32_to_cpu(*val);
 }
 
-/*
- * An example for amps dts node configure:
- *
- * amps {
- *	compatible = "uboot,rockchip-amp";
- *	status = "okay";
- *
- *	amp@0 {
- *		description  = "mcu-os1";
- *		partition    = "mcu1";
- *		cpu          = <0x1>;		// this is mpidr!
- *		aarch64	     = <1>;	     	// 0: aarch32, 1: aarch64
- *		thumb	     = <0>;		// 0: arm, 1: thumb
- *		hyp	     = <1>;	 	// 0: el1/svc, 1: el2/hyp
- *		secure	     = <0>;		// 0: non-secure, 1: secure
- *		load         = <0x800000>;
- *		entry        = <0x800000>;
- *		memory       = <0x800000 0x400000>;
- *	};
- *
- *	amp@1 {
- *		......
- *	};
- *
- *	......
- * };
- *
- * U-Boot load "mcu-os1" firmware to "0x800000" address from partiton
- * "mcu1" for cpu[1] with ARM, aarch64, hyp(el2) and non-secure state,
- * running on 0x800000.
- *
- * U-Boot reserve memory from 0x800000 with 0x400000 size in order
- * to make it invisible for kernel.
- *
- * Please use rockchip tool "mkkrnlimg" to pack firmware binary, example:
- * ./scripts/mkkrnlimg mcu-os1.bin mcu-os1.img
- */
-
-static int rockchip_amp_cpu_on(struct udevice *dev)
+static int parse_cpus_boot_by_linux(void)
 {
-	struct dm_amp_uclass_platdata *uc_pdata;
-	struct blk_desc *dev_desc;
-	disk_partition_t part_info;
-	int ret, size;
-	u32 pe_state;
+	const void *fdt = gd->fdt_blob;
+	int noffset, cpu;
+	int mpidr, i = 0;
 
-	uc_pdata = dev_get_uclass_platdata(dev);
-	if (!uc_pdata)
-		return -ENXIO;
+	memset(g_cpus_boot_by_linux, 0xff, sizeof(g_cpus_boot_by_linux));
+	noffset = fdt_path_offset(fdt, LINXU_AMP_NODES);
+	if (noffset < 0)
+		return 0;
 
-	dev_desc = rockchip_get_bootdev();
-	if (!dev_desc)
-		return -EEXIST;
+	fdt_for_each_subnode(cpu, fdt, noffset) {
+		mpidr = fdtdec_get_uint(fdt, cpu, "id", 0xffffffff);
+		if (mpidr == 0xffffffff)
+			continue;
+		g_cpus_boot_by_linux[i++] = mpidr;
+		printf("CPU[0x%x] is required boot by Linux\n", mpidr);
+	}
 
-	ret = part_get_info_by_name(dev_desc, uc_pdata->partition, &part_info);
-	if (ret < 0) {
-		AMP_E("\"%s\" find partition \"%s\" failed\n",
-		      uc_pdata->desc, uc_pdata->partition);
+	return 0;
+}
+
+static int load_linux_for_nonboot_cpu(u32 cpu, u32 aarch64, u32 load,
+				      u32 *entry, boot_args_t *args)
+{
+	static const char *boot_cmd[] = {
+		"boot_fit", "boot_android ${devtype} ${devnum}" };
+	int i, ret;
+
+	env_set_hex("bootm_states_unmask", BOOTM_STATE_OS_GO);
+	for (i = 0; i < ARRAY_SIZE(boot_cmd); i++) {
+		ret = run_command(boot_cmd[i], 0);
+		if (!ret)
+			break;
+	}
+	env_set("bootm_states_unmask", NULL);
+	if (ret) {
+		AMP_E("Load linux failed, ret=%d\n", ret);
 		return ret;
 	}
 
-	if (uc_pdata->reserved_mem[1]) {
-		ret = bidram_reserve_by_name(uc_pdata->partition,
-					     uc_pdata->reserved_mem[0],
-					     uc_pdata->reserved_mem[1]);
-		if (ret) {
-			AMP_E("Reserve \"%s\" region at 0x%08x - 0x%08x failed, ret=%d\n",
-			      uc_pdata->desc, uc_pdata->reserved_mem[0],
-			      uc_pdata->reserved_mem[0] +
-			      uc_pdata->reserved_mem[1], ret);
-			return -ENOMEM;
-		}
+	/* linux boot args */
+	if (aarch64) {
+		args->arg0 = (ulong)gd->fdt_blob;
+		args->arg1 = 0;
+		args->arg2 = 0;
+	} else {
+		args->arg0 = 0;
+		args->arg1 = 0;
+		args->arg2 = (ulong)gd->fdt_blob;
 	}
 
-	size = read_rockchip_image(dev_desc, &part_info,
-				   (void *)(ulong)uc_pdata->load);
-	if (size < 0) {
-		AMP_E("\"%s\" load at 0x%08x failed\n",
-		      uc_pdata->desc, uc_pdata->load);
-		return size;
-	}
+	/* don't need call cleanup_before_linux() as this nonboot cpu is clean */
+	board_quiesce_devices(&images);
+	flush_dcache_all();
 
-	flush_dcache_range(uc_pdata->load,
-			   uc_pdata->load + ALIGN(size, ARCH_DMA_MINALIGN));
+	/* fixup: ramdisk/fdt/entry depend on U-Boot */
+	*entry = env_get_ulong("kernel_addr_r", 16, 0);
 
-	pe_state = PE_STATE(uc_pdata->aarch64, uc_pdata->hyp,
-			    uc_pdata->thumb, uc_pdata->secure);
+	return 0;
+}
 
-	AMP_I("Brought up cpu[%x] with state(%x) from \"%s\" entry 0x%08x ...",
-	      uc_pdata->cpu, pe_state, uc_pdata->desc, uc_pdata->entry);
+static int is_default_pe_state(u32 pe_state)
+{
+#ifdef CONFIG_ARM64
+	return (pe_state == PE_STATE(1, 1, 0, 0));
+#else
+	return (pe_state == PE_STATE(0, 0, 0, 0));
+#endif
+}
 
-	sip_smc_amp_cfg(AMP_PE_STATE, uc_pdata->cpu, pe_state);
-	ret = psci_cpu_on(uc_pdata->cpu, uc_pdata->entry);
+static void setup_sync_bits_for_linux(void)
+{
+	u32 val, num_irq, offset;
+
+	val = gicd_readl(GICD_CTLR);
+	val &= ~0x3;
+	gicd_writel(val, GICD_CTLR);
+
+	num_irq = 32 * ((gicd_readl(GICD_TYPER) & 0x1F) + 1);
+	offset = ((num_irq - 1) / 4) * 4;
+	gicd_writel(0x0, GICD_IPRIORITYRn + offset);
+}
+
+static int smc_cpu_on(u32 cpu, u32 pe_state, u32 entry,
+		      boot_args_t *args, bool is_linux)
+{
+	int ret;
+
+	AMP_I("Brought up cpu[%x] with state 0x%x, entry 0x%08x ...",
+	      cpu, pe_state, entry);
+
+	/* if target pe state is default arch state, power up cpu directly */
+	if (is_default_pe_state(pe_state))
+		goto finish;
+
+	ret = sip_smc_amp_cfg(AMP_PE_STATE, cpu, pe_state, 0);
 	if (ret) {
-		printf("failed\n");
+		AMP_E("smc pe-state, ret=%d\n", ret);
+		return ret;
+	}
+
+	/* only linux needs boot args */
+	if (!is_linux)
+		goto finish;
+
+	ret = sip_smc_amp_cfg(AMP_BOOT_ARG01, cpu, args->arg0, args->arg1);
+	if (ret) {
+		AMP_E("smc boot arg01, ret=%d\n", ret);
+		return ret;
+	}
+
+	ret = sip_smc_amp_cfg(AMP_BOOT_ARG23, cpu, args->arg2, args->arg3);
+	if (ret) {
+		AMP_E("smc boot arg23, ret=%d\n", ret);
+		return ret;
+	}
+
+finish:
+	ret = psci_cpu_on(cpu, entry);
+	if (ret) {
+		printf("cpu up failed, ret=%d\n", ret);
 		return ret;
 	}
 	printf("OK\n");
@@ -184,30 +206,245 @@ static int rockchip_amp_cpu_on(struct udevice *dev)
 	return 0;
 }
 
-static const struct dm_amp_ops rockchip_amp_ops = {
-	.cpu_on = rockchip_amp_cpu_on,
-};
-
-U_BOOT_DRIVER(rockchip_amp) = {
-	.name	   = "rockchip_amp",
-	.id	   = UCLASS_AMP,
-	.ops	   = &rockchip_amp_ops,
-};
-
-/* AMP bus driver as all amp parent */
-static int rockchip_amp_bus_bind(struct udevice *dev)
+static int brought_up_amp(void *fit, int noffset,
+			  boot_cpu_t *bootcpu, int is_linux)
 {
-	return amp_bind_children(dev, "rockchip_amp");
+	const char *desc;
+	boot_args_t args;
+	u32 cpu, aarch64, hyp;
+	u32 load, thumb, us;
+	u32 pe_state, entry;
+	int boot_on;
+	int data_size;
+	int i, ret;
+	u8  arch = -ENODATA;
+
+	desc = fdt_getprop(fit, noffset, "description", NULL);
+	cpu = fit_get_u32_default(fit, noffset, "cpu", -ENODATA);
+	hyp = fit_get_u32_default(fit, noffset, "hyp", 0);
+	thumb = fit_get_u32_default(fit, noffset, "thumb", 0);
+	load = fit_get_u32_default(fit, noffset, "load", -ENODATA);
+	us = fit_get_u32_default(fit, noffset, "udelay", 0);
+	boot_on = fit_get_u32_default(fit, noffset, "boot-on", 1);
+	fit_image_get_arch(fit, noffset, &arch);
+	fit_image_get_data_size(fit, noffset, &data_size);
+	memset(&args, 0, sizeof(args));
+
+	if (!desc || cpu == -ENODATA || arch == -ENODATA ||
+	    (load == -ENODATA && !is_linux)) {
+		AMP_E("Property missing!\n");
+		return -EINVAL;
+	}
+	aarch64 = (arch == IH_ARCH_ARM) ? 0 : 1;
+	pe_state = PE_STATE(aarch64, hyp, thumb, 0);
+	entry = load;
+
+#ifdef DEBUG
+	AMP_I("       desc: %s\n", desc);
+	AMP_I("        cpu: 0x%x\n", cpu);
+	AMP_I("    aarch64: %d\n", aarch64);
+	AMP_I("        hyp: %d\n", hyp);
+	AMP_I("      thumb: %d\n", thumb);
+	AMP_I("      entry: 0x%08x\n", entry);
+	AMP_I("   pe_state: 0x%08x\n", pe_state);
+	AMP_I("   linux-os: %d\n\n", is_linux);
+#endif
+
+	/* this cpu is boot cpu ? */
+	if ((read_mpidr() & 0x0fff) == cpu) {
+		bootcpu->arch = arch;
+		bootcpu->entry = entry;
+		bootcpu->state = pe_state;
+		bootcpu->linux_os = is_linux;
+		return 0;
+	}
+
+	/* === only nonboot cpu can reach here === */
+
+	/* load or check */
+	if (is_linux) {
+		ret = load_linux_for_nonboot_cpu(cpu,
+				aarch64, load, &entry, &args);
+		if (ret)
+			return ret;
+		/*
+		 * Must setup before jump to linux.
+		 * This is an appointment on RK amp solution to handle
+		 * GIC configure competition.
+		 */
+		setup_sync_bits_for_linux();
+	} else {
+		if (!sysmem_alloc_base_by_name(desc,
+				(phys_addr_t)load, data_size))
+			return -ENXIO;
+	}
+
+	/* If linux assign the boot-on state, use it */
+	for (i = 0; i < ARRAY_SIZE(g_cpus_boot_by_linux); i++) {
+		if (cpu == g_cpus_boot_by_linux[i]) {
+			boot_on = 0;
+			break;
+		}
+	}
+
+	if (!boot_on)
+		return 0;
+
+	/* boot now */
+	ret = smc_cpu_on(cpu, pe_state, entry, &args, is_linux);
+	if (ret)
+		return ret;
+
+	if (us)
+		udelay(us);
+
+	return 0;
 }
 
-static const struct udevice_id rockchip_amp_bus_match[] = {
-	{ .compatible = "uboot,rockchip-amp", },
-	{},
-};
+static int brought_up_all_amp(void *fit, const char *fit_uname_cfg)
+{
+	int loadables_index;
+	int linux_noffset;
+	int conf_noffset;
+	int cpu_noffset;
+	int ret;
+	const char *uname;
 
-U_BOOT_DRIVER(rockchip_amp_bus) = {
-	.name	   = "rockchip_amp_bus",
-	.id	   = UCLASS_SIMPLE_BUS,
-	.of_match  = rockchip_amp_bus_match,
-	.bind	   = rockchip_amp_bus_bind,
-};
+	conf_noffset = fit_conf_get_node(fit, fit_uname_cfg);
+	if (conf_noffset < 0)
+		return conf_noffset;
+
+	linux_noffset = fdt_subnode_offset(fit, conf_noffset, "linux");
+	if (linux_noffset > 0) {
+		ret = brought_up_amp(fit, linux_noffset, &g_bootcpu, 1);
+		if (ret)
+			return ret;
+	}
+
+	for (loadables_index = 0;
+	     uname = fdt_stringlist_get(fit, conf_noffset,
+			FIT_LOADABLE_PROP, loadables_index, NULL), uname;
+	     loadables_index++) {
+		cpu_noffset = fit_image_get_node(fit, uname);
+		if (cpu_noffset < 0)
+			return cpu_noffset;
+
+		ret = brought_up_amp(fit, cpu_noffset, &g_bootcpu, 0);
+		if (ret)
+			return ret;
+	}
+
+	/* === only boot cpu can reach here === */
+
+	if (!g_bootcpu.linux_os) {
+		flush_dcache_all();
+		AMP_I("Brought up cpu[%x, self] with state 0x%x, entry 0x%08x ...",
+		      (u32)read_mpidr() & 0x0fff, g_bootcpu.state, g_bootcpu.entry);
+		cleanup_before_linux();
+		printf("OK\n");
+#ifdef CONFIG_ARM64
+		armv8_switch_to_el2(0, 0, 0, g_bootcpu.state, (u64)g_bootcpu.entry,
+		     g_bootcpu.arch == IH_ARCH_ARM ? ES_TO_AARCH32 : ES_TO_AARCH64);
+#else
+		void (*armv7_entry)(void);
+
+		armv7_entry = (void (*)(void))g_bootcpu.entry;
+		armv7_entry();
+#endif
+	}
+
+	/* return: boot cpu continue to boot linux */
+	return 0;
+}
+
+int amp_cpus_on(void)
+{
+	struct blk_desc *dev_desc;
+	bootm_headers_t images;
+	disk_partition_t part;
+	void *hdr, *fit;
+	int offset, cnt;
+	int totalsize;
+	int ret = 0;
+
+	dev_desc = rockchip_get_bootdev();
+	if (!dev_desc)
+		return -EIO;
+
+	if (part_get_info_by_name(dev_desc, AMP_PART, &part) < 0)
+		return -ENODEV;
+
+	hdr = memalign(ARCH_DMA_MINALIGN, FIT_HEADER_SIZE);
+	if (!hdr)
+		return -ENOMEM;
+
+	/* get totalsize */
+	offset = part.start;
+	cnt = DIV_ROUND_UP(FIT_HEADER_SIZE, part.blksz);
+	if (blk_dread(dev_desc, offset, cnt, hdr) != cnt) {
+		ret = -EIO;
+		goto out2;
+	}
+
+	if (fdt_check_header(hdr)) {
+		AMP_E("Not fit\n");
+		ret = -EINVAL;
+		goto out2;
+	}
+
+	if (fit_get_totalsize(hdr, &totalsize)) {
+		AMP_E("No totalsize\n");
+		ret = -EINVAL;
+		goto out2;
+	}
+
+	/* load image */
+	fit = memalign(ARCH_DMA_MINALIGN, ALIGN(totalsize, part.blksz));
+	if (!fit) {
+		printf("No memory\n");
+		ret = -ENOMEM;
+		goto out2;
+	}
+
+	memcpy(fit, hdr, FIT_HEADER_SIZE);
+
+	offset += cnt;
+	cnt = DIV_ROUND_UP(totalsize, part.blksz) - cnt;
+	if (blk_dread(dev_desc, offset, cnt, fit + FIT_HEADER_SIZE) != cnt) {
+		ret = -EIO;
+		goto out1;
+	}
+
+	/* prase linux info */
+	parse_cpus_boot_by_linux();
+
+	/* Load loadables */
+	memset(&images, 0, sizeof(images));
+	images.fit_uname_cfg = "conf";
+	images.fit_hdr_os = fit;
+	images.verify = 1;
+	ret = boot_get_loadable(0, NULL, &images, IH_ARCH_DEFAULT, NULL, NULL);
+	if (ret) {
+		AMP_E("Load loadables, ret=%d\n", ret);
+		goto out1;
+	}
+	flush_dcache_all();
+
+	/* Wakeup */
+	ret = brought_up_all_amp(images.fit_hdr_os, images.fit_uname_cfg);
+	if (ret)
+		AMP_E("Brought up amps, ret=%d\n", ret);
+out1:
+	free(fit);
+out2:
+	free(hdr);
+
+	return ret;
+}
+
+int arm64_switch_amp_pe(bootm_headers_t *images)
+{
+	images->os.arch = g_bootcpu.arch;
+	return g_bootcpu.state;
+}
+

@@ -6,7 +6,7 @@
 #
 
 # Process args and auto set variables
-source ./${srctree}/arch/arm/mach-rockchip/make_fit_args.sh
+source ./${srctree}/arch/arm/mach-rockchip/fit_args.sh
 
 if [ ! -f ${srctree}/images/ramdisk ]; then
 	touch ${srctree}/images/ramdisk
@@ -16,11 +16,15 @@ if [ "${COMPRESSION}" == "gzip" ]; then
 	gzip -k -f -9 ${srctree}/images/kernel
 	SUFFIX=".gz"
 elif [ "${COMPRESSION}" == "lz4" ]; then
-	lz4c -9 -f ${srctree}/images/kernel > ${srctree}/images/kernel.lz4
+	${srctree}/scripts/compress.sh lz4 ${srctree}/images/kernel
 	SUFFIX=".lz4"
 else
 	COMPRESSION="none"
 	SUFFIX=
+fi
+
+if grep  -q '^CONFIG_FIT_ENABLE_RSASSA_PSS_SUPPORT=y' .config ; then
+	ALGO_PADDING="				padding = \"pss\";"
 fi
 
 cat << EOF
@@ -39,7 +43,7 @@ cat << EOF
 
 	images {
 		fdt {
-			data = /incbin/("./images/rk-kernel.dtb");
+			data = /incbin/("./images/dtb");
 			type = "flat_dt";
 			arch = "${ARCH}";
 			compression = "none";
@@ -75,7 +79,7 @@ cat << EOF
 		};
 
 		resource {
-			data = /incbin/("./images/resource");
+			data = /incbin/("./images/second");
 			type = "multi";
 			arch = "${ARCH}";
 			compression = "none";
@@ -96,7 +100,7 @@ cat << EOF
 			multi = "resource";
 			signature {
 				algo = "sha256,rsa2048";
-				padding = "pss";
+				${ALGO_PADDING}
 				key-name-hint = "dev";
 				sign-images = "fdt", "kernel", "ramdisk", "multi";
 			};

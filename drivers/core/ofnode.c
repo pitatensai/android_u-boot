@@ -512,6 +512,54 @@ const void *ofnode_get_property(ofnode node, const char *propname, int *lenp)
 				   propname, lenp);
 }
 
+int ofnode_get_first_property(ofnode node, struct ofprop *prop)
+{
+	prop->node = node;
+
+	if (ofnode_is_np(node)) {
+		prop->prop = of_get_first_property(ofnode_to_np(prop->node));
+		if (!prop->prop)
+			return -FDT_ERR_NOTFOUND;
+	} else {
+		prop->offset =
+			fdt_first_property_offset(gd->fdt_blob,
+						  ofnode_to_offset(prop->node));
+		if (prop->offset < 0)
+			return prop->offset;
+	}
+
+	return 0;
+}
+
+int ofnode_get_next_property(struct ofprop *prop)
+{
+	if (ofnode_is_np(prop->node)) {
+		prop->prop = of_get_next_property(ofnode_to_np(prop->node),
+						  prop->prop);
+		if (!prop->prop)
+			return -FDT_ERR_NOTFOUND;
+	} else {
+		prop->offset = fdt_next_property_offset(gd->fdt_blob,
+							prop->offset);
+		if (prop->offset  < 0)
+			return prop->offset;
+	}
+
+	return 0;
+}
+
+const void *ofnode_get_property_by_prop(const struct ofprop *prop,
+					const char **propname, int *lenp)
+{
+	if (ofnode_is_np(prop->node))
+		return of_get_property_by_prop(ofnode_to_np(prop->node),
+					       prop->prop, propname, lenp);
+	else
+		return fdt_getprop_by_offset(gd->fdt_blob,
+					     prop->offset,
+					     propname, lenp);
+}
+
 bool ofnode_is_available(ofnode node)
 {
 	if (ofnode_is_np(node))
@@ -701,4 +749,12 @@ int ofnode_read_resource_byname(ofnode node, const char *name,
 		return index;
 
 	return ofnode_read_resource(node, index, res);
+}
+
+u64 ofnode_translate_address(ofnode node, const fdt32_t *in_addr)
+{
+	if (ofnode_is_np(node))
+		return of_translate_address(ofnode_to_np(node), in_addr);
+	else
+		return fdt_translate_address(gd->fdt_blob, ofnode_to_offset(node), in_addr);
 }

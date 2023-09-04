@@ -222,6 +222,14 @@
 #define POSTDIV2(n)			((0x7 << (6 + 16)) | ((n) << 6))
 #define REFDIV(n)			((0x3F << 16) | (n))
 
+/* CRU_PLL_CON3 */
+#define SSMOD_SPREAD(n)			((0x1f << (8 + 16)) | ((n) << 8))
+#define SSMOD_DIVVAL(n)			((0xf << (4 + 16)) | ((n) << 4))
+#define SSMOD_DOWNSPREAD(n)		((0x1 << (3 + 16)) | ((n) << 3))
+#define SSMOD_RESET(n)			((0x1 << (2 + 16)) | ((n) << 2))
+#define SSMOD_DIS_SSCG(n)		((0x1 << (1 + 16)) | ((n) << 1))
+#define SSMOD_BP(n)			((0x1 << (0 + 16)) | ((n) << 0))
+
 /* CRU_MODE */
 #define CLOCK_FROM_XIN_OSC		(0)
 #define CLOCK_FROM_PLL			(1)
@@ -245,6 +253,10 @@
 #define CRU_CLKGATE_CON(i)		(CRU_CLKGATE_CON_BASE + ((i) * 4))
 #define CRU_CLKSFTRST_CON_BASE		0x300
 #define CRU_CLKSFTRST_CON(i)		(CRU_CLKSFTRST_CON_BASE + ((i) * 4))
+
+/* SGRF_SOC_CON2 */
+#define MSCH_AXI_BYPASS_ALL_MASK	(1)
+#define MSCH_AXI_BYPASS_ALL_SHIFT	(15)
 
 /* SGRF_SOC_CON12 */
 #define CLK_DDR_UPCTL_EN_MASK		((0x1 << 2) << 16)
@@ -358,5 +370,51 @@ struct rv1126_fsp_param {
  * from share memory space.
  */
 #define FSP_PARAM_STORE_ADDR	(SHARE_MEM_BASE)
+
+/* store result of read and write training, for ddr_dq_eye tool in u-boot */
+#define RW_TRN_RESULT_ADDR	(0x2000000 + 0x8000)	/* 32M + 32k */
+#define PRINT_STEP		1
+
+#undef FSP_NUM
+#undef CS_NUM
+#undef BYTE_NUM
+
+#define FSP_NUM			4
+#define CS_NUM			2
+#define BYTE_NUM		4
+#define RD_DESKEW_NUM		64
+#define WR_DESKEW_NUM		64
+
+#define LP4_WIDTH_REF_MHZ_H	1056
+#define LP4_RD_WIDTH_REF_H	12
+#define LP4_WR_WIDTH_REF_H	13
+
+#define LP4_WIDTH_REF_MHZ_L	924
+#define LP4_RD_WIDTH_REF_L	15
+#define LP4_WR_WIDTH_REF_L	15
+
+#define DDR4_WIDTH_REF_MHZ_H	1056
+#define DDR4_RD_WIDTH_REF_H	13
+#define DDR4_WR_WIDTH_REF_H	9
+
+#define DDR4_WIDTH_REF_MHZ_L	924
+#define DDR4_RD_WIDTH_REF_L	15
+#define DDR4_WR_WIDTH_REF_L	11
+
+#define LP3_WIDTH_REF_MHZ_H	1056
+#define LP3_RD_WIDTH_REF_H	15
+#define LP3_WR_WIDTH_REF_H	13
+
+#define LP3_WIDTH_REF_MHZ_L	924
+#define LP3_RD_WIDTH_REF_L	16
+#define LP3_WR_WIDTH_REF_L	15
+
+#define DDR3_WIDTH_REF_MHZ_H	1056
+#define DDR3_RD_WIDTH_REF_H	14
+#define DDR3_WR_WIDTH_REF_H	14
+
+#define DDR3_WIDTH_REF_MHZ_L	924
+#define DDR3_RD_WIDTH_REF_L	17
+#define DDR3_WR_WIDTH_REF_L	17
 
 #endif /* _ASM_ARCH_SDRAM_RK1126_H */

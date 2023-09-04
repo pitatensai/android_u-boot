@@ -595,6 +595,8 @@ config BOARD_EARLY_INIT_R
 	  in the post-relocation init sequence.
 
 endmenu
+
+menu "Android features support"
 config ANDROID_BOOTLOADER
 	bool "Support for Android Bootloader boot flow"
 	default n
@@ -634,6 +636,12 @@ config ANDROID_AVB
 	  to verify the boot images. The vbmeta must be matched with images,
 	  if not, verify failed.
 
+config ANDROID_AVB_ROLLBACK_INDEX
+	bool"Support Android Verified Boot Rollback Index"
+	default n
+	help
+	  If enabled, support the android verified boot rollback index.
+
 config ANDROID_KEYMASTER_CA
 	bool "Support Keymaster CA"
 	default y
@@ -654,10 +662,11 @@ config ANDROID_BOOT_IMAGE_HASH
 	help
 	  This enables support for Android image hash verify, the mkbootimg always use
 	  SHA1 for images.
+endmenu
 
 config SKIP_RELOCATE_UBOOT
 	bool "Skip U-Boot relocation"
-	default y if !ARM64
+	default y if !ARM64 && !ARM64_BOOT_AARCH32
 	help
 	  This enable support for skipping U-Boot relocation.
 
